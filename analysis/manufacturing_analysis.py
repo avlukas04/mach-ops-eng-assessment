@@ -5,7 +5,8 @@ Traces the flight anomaly (left aileron seizure on GLDR-0421)
 back to the factory build data in manufacturing.csv.
 
 Produces:
-  1. GLDR-0421 build record summary (console)
+  1. GLDR-0421 build record summary and a screen of every column in its
+     record against the fleet (console)
   2. Fleet statistics for 5 key servo parameters (console)
   3. Z-score analysis (console)
   4. Fleet-wide outlier scan (how many other vehicles have similar issues)
@@ -58,6 +59,56 @@ METRICS = [
 
 # Threshold for flagging an outlier (standard Shewhart control limit)
 Z_THRESHOLD = 3.0
+
+
+# Columns that identify a unit or a timestamp rather than describe it
+ID_COLUMNS = {"vehicle_id", "unit_serial", "build_id", "work_order_id", "build_date_utc",
+              "final_qc_timestamp_utc", "rework_notes"}
+
+
+# ---------------------------------------------------------------------------
+# Full-record screen: is anything else about this vehicle unusual?
+# ---------------------------------------------------------------------------
+def full_record_screen(path, vehicle_id, top_n=8):
+    """
+    Compare every column of one vehicle's record with the fleet before
+    focusing on the servo bench data, so the conclusion isn't limited to
+    the columns we already suspected.
+
+    Numeric columns: robust z = (x - median) / (IQR / 1.349), both sides.
+    Text columns: the share of the fleet that has the same value. Columns
+    where most values are unique (batch IDs, serials) can't single out a
+    unit and are counted separately.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path, low_memory=False)
+    target = df.index[df["vehicle_id"] == vehicle_id][0]
+
+    num = df.select_dtypes("number")
+    spread = (num.quantile(0.75) - num.quantile(0.25)) / 1.349
+    z = ((num.loc[target] - num.median()) / spread.where(spread > 0)).dropna()
+    ranked = z.reindex(z.abs().sort_values(ascending=False).index)
+
+    rare, id_like = [], 0
+    for c in df.select_dtypes(exclude="number").columns:
+        if c in ID_COLUMNS or c.endswith("_serial"):
+            continue
+        values = df[c].fillna("(blank)")
+        if values.nunique() > 0.5 * len(df):
+            id_like += 1
+            continue
+        share = (values == values.iat[target]).mean()
+        rare.append((share, c, values.iat[target], 1 / values.nunique()))
+    rare.sort()
+
+    return {
+        "n_numeric": len(num.columns), "n_numeric_scored": len(z),
+        "top": [(c, num.at[target, c], v) for c, v in ranked.head(top_n).items()],
+        "n_over_3": int((z.abs() >= 3).sum()),
+        "n_text": len(rare) + id_like, "id_like": id_like,
+        "rarest": rare[:3],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -392,8 +443,22 @@ def main():
     for label, key in build_fields:
         print(f"    {label:<20}: {target_row.get(key, 'N/A')}")
 
+    # Screen the whole record before narrowing to the servo bench data
+    print(f"\n[3] Full Record Screen — every column of {TARGET_VEHICLE} vs the fleet:")
+    screen = full_record_screen(MFG_PATH, TARGET_VEHICLE)
+    print(f"    Numeric columns: {screen['n_numeric_scored']} of {screen['n_numeric']} scored "
+          f"(robust z, both sides); {screen['n_over_3']} at |z| ≥ 3. Largest:")
+    for c, v, zv in screen["top"]:
+        print(f"      {c:<42} {v:>10.3f}  z = {zv:+.2f}")
+    print(f"    Text columns: {screen['n_text']} checked; {screen['id_like']} are near-unique "
+          f"per vehicle (batch / lot IDs) and can't single out a unit. Rarest of the rest:")
+    for share, c, v, typical in screen["rarest"]:
+        print(f"      {c:<42} {str(v):>10}  shared by {share:.1%} of fleet "
+              f"(an even split would be {typical:.1%})")
+    print(f"    → Only the left aileron servo's bench readings stand out.")
+
     # Print the left aileron servo details
-    print(f"\n[3] Left Aileron Servo (Defective Component):")
+    print(f"\n[4] Left Aileron Servo (Defective Component):")
     servo_fields = [
         ("Vendor", "aileron_l_servo_vendor"),
         ("Model", "aileron_l_servo_model"),
@@ -404,7 +469,7 @@ def main():
         print(f"    {label:<20}: {target_row.get(key, 'N/A')}")
 
     # Z-score analysis
-    print(f"\n[4] Z-Score Analysis — {TARGET_VEHICLE} vs Fleet of {total_vehicles:,}:")
+    print(f"\n[5] Z-Score Analysis — {TARGET_VEHICLE} vs Fleet of {total_vehicles:,}:")
     results = analyze(fleet_data, target_row, total_vehicles)
 
     for surf in SURFACES:
@@ -422,7 +487,7 @@ def main():
                   f"{r['z_score']:>+8.2f} {flag:>6}")
 
     # Fleet-wide outlier scan
-    print(f"\n[5] Fleet-Wide Outlier Scan (threshold = ±{Z_THRESHOLD}σ):")
+    print(f"\n[6] Fleet-Wide Outlier Scan (threshold = ±{Z_THRESHOLD}σ):")
     flagged_counts, thresholds = fleet_outlier_scan(fleet_data, total_vehicles)
 
     total_flagged = 0
@@ -436,7 +501,7 @@ def main():
     # Lot check: is the suspect servo's whole lot shifted, or just this unit?
     target_lot = target_row[f"{SUSPECT_SURFACE}_servo_lot_id"]
     lot_means = {lot: sum(v) / len(v) for lot, v in lot_values.items()}
-    print(f"\n[6] Supplier Lot Check ({SUSPECT_SURFACE} sweep current):")
+    print(f"\n[7] Supplier Lot Check ({SUSPECT_SURFACE} sweep current):")
     print(f"    {target_lot}: mean {lot_means[target_lot]:.2f} mA over "
           f"{len(lot_values[target_lot]):,} units")
     print(f"    All {len(lot_means)} lots: mean range "
@@ -444,7 +509,7 @@ def main():
     print(f"    → {'Lot is NOT shifted — single-unit defect' if max(lot_means.values()) - min(lot_means.values()) < 5 else 'Lot means differ — investigate supplier'}")
 
     # Other units with the same signature
-    print(f"\n[7] Other Vehicles With the Same Friction Signature "
+    print(f"\n[8] Other Vehicles With the Same Friction Signature "
           f"(sweep AND peak current ≥ {Z_THRESHOLD}σ on one servo):")
     hits = similar_signature_scan(fleet_data, vehicle_ids)
     print(f"    {'Vehicle':<13} {'Servo':<10} {'Sweep mA':>9} {'Z':>6} {'Peak mA':>9} {'Z':>6}")
@@ -455,7 +520,7 @@ def main():
           f"spc_detector.py applies the full production gate.")
 
     # QC Gap analysis — computed from final_qc_pass / qc_exception_count
-    print(f"\n[8] Quality Process Gap Analysis:")
+    print(f"\n[9] Quality Process Gap Analysis:")
     n = total_vehicles
     print(f"    Vehicles with final_qc_pass = 1:   {qc['pass']:,} of {n:,} ({qc['pass'] / n:.1%})")
     print(f"    Vehicles with scrap_flag = 1:      {qc['scrap']:,}")
@@ -463,11 +528,12 @@ def main():
     print(f"      ...of which still passed QC:     {qc['exceptions_and_passed']:,}")
     print(f"    Vehicles with rework code R05:     {qc['rework_r05']:,}")
     print(f"    ")
-    print(f"    ⚠️  Bench measurements are recorded but never compared against limits.")
+    print(f"    ⚠️  final_qc_pass is 1 for every vehicle, including the two most extreme")
+    print(f"        servos in the fleet, so no bench reading affects the pass decision.")
     print(f"    ⚠️  Logged QC exceptions do not block a pass.")
 
     # Generate figures
-    print(f"\n[9] Generating figures...")
+    print(f"\n[10] Generating figures...")
     generate_figures(fleet_data, results, OUTPUT_DIR)
 
     # Summary

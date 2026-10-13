@@ -89,7 +89,7 @@ SPC serves as an **alarm system**, not the mechanic. It does not need to know th
 
 **Yes, exactly.** You identified the exact root vulnerability of Mach's factory quality gate:
 
-1. **The Flawed QC Gate:** From the data, the existing end-of-line test behaves as if it only evaluated a binary condition. Every unit passed, including 32,296 with logged QC exceptions:
+1. **The Flawed QC Gate:** From the data, the existing end-of-line test behaves as if it only evaluated a binary condition. Every unit passed, including 32,296 with logged QC exceptions. The QC procedure itself isn't in the data, so the rule below is the most likely mechanism, not a confirmed one:
    $$\text{Result} = \begin{cases} \text{FAIL} & \text{if hardware throws an internal fault code} \\ \text{PASS} & \text{if sweep completes without a crash/code} \end{cases}$$
 2. **The Escaped Defect:** GLDR-0421's left aileron servo did not throw a firmware error code or trip an overcurrent circuit breaker. It completed the sweep test, but required **332.7 mA** to push through mechanically stiff gears.
 3. **The Missed Opportunity:** The factory test bench measured and recorded `sweep_current = 332.7` into `manufacturing.csv`, but never evaluated the number against an upper bound. It stamped `QC_STATUS = PASS`.

@@ -107,6 +107,8 @@ The servo's current draw during the event (about 0.39 A, against 0.34 A before i
 
 ## 4. Manufacturing Investigation
 
+The flight data points to the left aileron servo, but a manufacturing record has about 140 fields per vehicle. As with the control surfaces in §3.2, I first screened the whole record for GLDR-0421 before focusing on the servo.
+
 ### 4.1 Unit traceability
 
 | Field | Value |
@@ -117,7 +119,29 @@ The servo's current draw during the event (about 0.39 A, against 0.34 A before i
 | Rework | 1 × R05: *"Updated firmware + parameter profile; repeated self-test."* |
 | QC | `final_qc_pass = 1`, `qc_exception_count = 0` |
 
-### 4.2 Bench test results against the fleet (N = 200,000)
+### 4.2 Screening the full build record
+
+Every column of GLDR-0421's record was compared with the other 199,999 vehicles:
+
+**Numeric columns** (74 scored of 79; the other 5 have no spread across the fleet). Robust z = (x − median) / (IQR / 1.349), checking both high and low. Only **2** columns reach |z| ≥ 3, and both are left aileron servo readings. The next five largest are also mostly left aileron readings:
+
+| Column | GLDR-0421 | Robust z |
+|:--|--:|--:|
+| **Left aileron sweep current (mA)** | 332.70 | **+5.92** |
+| **Left aileron peak current (mA)** | 400.32 | **+4.03** |
+| Left aileron sweep time (ms) | 940.89 | +2.92 |
+| Left aileron position error RMS (°) | 1.128 | +2.88 |
+| Right elevon hysteresis (°) | 1.105 | +2.52 |
+| Right aileron idle current (mA) | 52.17 | +2.35 |
+| Left aileron backdrive torque (N·mm) | 133.68 | +2.32 |
+
+Nothing else on the vehicle stands out: power rails, servo bus, centre of gravity, masses, IMU and magnetometer biases, trims, assembly torques, linkage measurements and the other four servos are all within |z| < 2.6.
+
+**Text columns** (51). 8 are near-unique per vehicle (batch and lot IDs), so they can't single out a unit. For the rest, GLDR-0421's values are ordinary. Its rarest are technician T182 (0.8% of builds), inspector Q30 (2.0%) and QC checklist CL-6.4 (2.4%), which is exactly what an even split across 120 technicians, 50 inspectors and 40 checklist versions gives.
+
+So the bench data for one servo is the only part of this vehicle's build record that is abnormal.
+
+### 4.3 Bench test results against the fleet (N = 200,000)
 
 Every vehicle's five servos (left and right elevon, left and right aileron, rudder) go through a bench sweep test with 9 measurements each. I compared GLDR-0421 with the full fleet using Z-scores, Z = (x − μ) / σ.
 
@@ -139,18 +163,18 @@ Taken together, these readings describe a servo that needs much more current to 
 
 **Fig 5. GLDR-0421 |Z| for 25 bench measurements (5 servos × 5 metrics).** The dashed ring is 3σ. Only the left aileron goes past it. All four other servos are within |Z| < 2.6 on every metric, so the defect is in this one servo and not the vehicle as a whole.
 
-### 4.3 What it is not
+### 4.4 What it is not
 
 - **Not a bad supplier lot.** Lot L2026-07B (5,784 units) has a normal average sweep current, so this is a single defective unit. This matters for containment: we do not need to recall the lot, but we do need to screen individual units, because single-unit defects will keep happening.
 - **Not an assembly error.** All installation measurements for this unit are normal (Section 3.4).
 - **Not unique.** **GLDR-200000** shows the same signature: 304.2 mA sweep current (+4.78σ) and 367.7 mA peak current, built 2026-02-18 at OC-PLANT-2 with servo lot L2026-02B. Its plant, lot, and rework history all differ from GLDR-0421, which again points to random single-unit defects that only screening each unit can catch. **This vehicle should be held and its left aileron servo pulled for teardown.**
-- **A borderline group to retest.** Scanning the fleet for the same pattern (sweep current *and* peak current both ≥ 3σ on one servo) finds 10 vehicles. GLDR-0421 (+5.93 / +4.05) and GLDR-200000 (+4.78 / +3.11) stand well clear. The other 8 sit just over the line (3.0–3.6σ on both readings), across all five servo positions. If the two readings are independent, about 2 such units would be expected by chance, so these 8 may include milder cases of the same defect. They don't meet the QUARANTINE limit, but they should be first in line for bench retest. (Listed in `manufacturing_analysis.py` output, step [7].)
+- **A borderline group to retest.** Scanning the fleet for the same pattern (sweep current *and* peak current both ≥ 3σ on one servo) finds 10 vehicles. GLDR-0421 (+5.93 / +4.05) and GLDR-200000 (+4.78 / +3.11) stand well clear. The other 8 sit just over the line (3.0–3.6σ on both readings), across all five servo positions. If the two readings are independent, about 2 such units would be expected by chance, so these 8 may include milder cases of the same defect. They don't meet the QUARANTINE limit, but they should be first in line for bench retest. (Listed in `manufacturing_analysis.py` output, step [8].)
 
 ---
 
 ## 5. Why Quality Missed It
 
-1. **Measurements are recorded but never judged.** The bench writes sweep current, peak current, sweep time, and the other measurements to `manufacturing.csv`, but the pass/fail decision only checks whether the sweep finished without a hardware fault code. A servo drawing 1.8× the normal current finishes the sweep and passes.
+1. **Measurements are recorded but never judged.** The bench writes sweep current, peak current, sweep time, and the other measurements to `manufacturing.csv`, but they have no effect on the pass decision: `final_qc_pass = 1` for every vehicle, including the two most extreme servos in the fleet. GLDR-0421's servo drew 1.8× the normal current and passed. The QC procedure itself isn't in the data, so *how* the gate decides is an inference. The most likely explanation is that it only checks that the sweep completed without a hardware fault code, and that should be confirmed with the quality team.
 2. **A 100% pass rate.** `final_qc_pass = 1` for **200,000 of 200,000** units, and `scrap_flag = 0` for all of them. Any real gate on a high-volume line rejects something. A 100% yield means the gate is not screening anything.
 3. **Logged exceptions don't block shipment.** **32,296 units (16%)** have `qc_exception_count > 0` with codes such as E02, E07, E11, E15, and E21, yet every one of them passed. GLDR-0421 had no exceptions, but this shows the gate's logic is broken beyond the missing limits.
 4. **A rework that missed a chance.** GLDR-0421 was reworked once (R05: firmware and parameter reflash, then a repeated self-test). R05 is common (about 9,600 units), so it is not suspicious by itself. But a reflash followed by a passing self-test checks the software state, not the mechanical health of the servo. No step after rework compares the bench numbers again.
@@ -228,7 +252,32 @@ Three measurements have an instrument ceiling, where readings pile up on one val
 - **Fix the exception logic.** A unit with `qc_exception_count > 0` cannot reach `final_qc_pass = 1` without a recorded engineering decision.
 - **Screen the units already built.** Run the detector over all 200,000 units now. The 2 QUARANTINE units, **GLDR-200000** and the already-lost GLDR-0421, need action now. Rank the FLAG list by D so the highest-scoring servos get retested before any flight.
 
-### 6.3 Future work (Phase 2, after the gate is in place)
+### 6.3 Standards basis and what still needs confirming
+
+**Scope.** "Detect similar defects" here means the same failure mode, a servo with excess internal friction, in **any** of the five servo positions and across all of its bench readings, plus fixing the process failure that let it ship (data recorded but never judged). A rule for the left aileron's sweep current alone would catch GLDR-0421 and nothing else. The method extends to any numeric QC column, but each added check brings its own false alarms, so it is extended one reviewed measurement at a time, not to every column at once.
+
+**The method is established, not invented.** The gate is a form of **Part Average Testing (PAT, AEC-Q001)**, the automotive electronics practice for parts that are within spec but behave unlike their peers, since such outliers fail early in the field at a higher rate. PAT sets limits at the population median plus or minus a multiple of a robust spread, (Q3 − Q1) / 1.35, the same spread this gate uses. PAT typically uses ±6 robust σ on single readings; this gate uses 5.5 on the high side only, plus the combined score D. The rest of the approach follows standard practice:
+
+| Area | Standard / method | Where it applies here |
+|:--|:--|:--|
+| Control charts | Shewhart charts with Western Electric / Nelson run rules (ISO 7870) | FLAG-rate p-charts by lot, line, shift and plant |
+| Process capability | Cpk (ISO 22514) | How close each bench reading runs to its spec limit, once spec limits exist |
+| Aerospace quality system | AS9100D; AS9102 first-article inspection; AS9145 (APQP / PPAP) | Every recorded measurement needs acceptance criteria and a documented reaction plan |
+| Closing the loop from failures | FRACAS (MIL-STD-2155); 8D problem solving | Feeding this flight failure, and future teardown results, back into the gate |
+| Early-failure screening | Environmental stress screening (MIL-HDBK-344) | An option if bench tests alone can't reveal friction |
+
+**Spec limits alongside statistical limits.** Standard practice applies both: an engineering limit (does the part meet its requirement?) and a statistical limit (does it behave like its peers?). The data has no spec limits, so this gate supplies only the statistical side. Engineering should add upper limits from the ActuMax SM-14 datasheet for current and sweep time. A statistical limit is still needed, because a datasheet limit is often loose enough that a part three times worse than its peers still passes.
+
+**Test the failure the servo actually had.** In flight the left aileron stuck when its direction reversed. Yet GLDR-0421's left aileron reversal readings were normal (hysteresis z = −0.15, deadband z = −0.92); the friction showed only in current, sweep time and position error. The bench sweep doesn't appear to exercise slow reversals under load, so a **low-speed reversal (stiction) test under load** should be added to the servo bench to target this failure directly.
+
+**What still needs confirming.** None of this calls for redesigning QC by trial and error. The limits come from false-alarm math, as in PAT, and are then confirmed or adjusted by evidence:
+
+1. **The current QC procedure**, to confirm what the pass decision actually checks (§5).
+2. **The servo datasheet**, for spec limits.
+3. **Teardown of GLDR-200000's left aileron servo**, to confirm the friction mechanism.
+4. **Teardowns of QUARANTINE and high-D FLAG units over time**, to measure how many real defects the gate catches and how many it misses, the normal FRACAS loop.
+
+### 6.4 Future work (Phase 2, after the gate is in place)
 
 - **Full covariance:** the combined score D assumes the measurements are independent, which holds in this data today. If a process change introduces correlation, switch to the full Mahalanobis distance, which accounts for it.
 - **Censored-data estimates:** fit the baseline with methods that treat the floor and ceiling readings as "at least" or "at most" values, rather than relying on the IQR alone.
@@ -245,7 +294,7 @@ As discussed with the Head of Ops, these come after the basic process is fixed. 
 | Tool | Purpose | Status |
 |:--|:--|:--|
 | `analysis/flight_investigation.py` | Part 1 investigation: builds the flight timeline (state, mode, and events), scores the waypoints, screens all five control surfaces for command-vs-actual divergence, detects every left-aileron sticking episode, computes each rule-out test from telemetry (mode, software, power, position sensor, wind/temperature, GPS/attitude), and produces Figs 1–3 | Done |
-| `analysis/manufacturing_analysis.py` | Traces the crashed vehicle (`--vehicle`, default GLDR-0421) to its build record. Computes Z-scores for all 5 servos, the supplier lot check, a scan listing every vehicle with the same friction signature, and the QC gap figures (pass rate, exceptions that still passed, R05 count). Produces Figs 4–5. It is an investigation tool; the production gate is `spc_detector.py` | Done |
+| `analysis/manufacturing_analysis.py` | Traces the crashed vehicle (`--vehicle`, default GLDR-0421) to its build record. Screens every column of that record against the fleet, then computes Z-scores for all 5 servos, the supplier lot check, a scan listing every vehicle with the same friction signature, and the QC gap figures (pass rate, exceptions that still passed, R05 count). Produces Figs 4–5. It is an investigation tool; the production gate is `spc_detector.py` | Done |
 | `tools/spc_detector.py` | The production gate (§6.1). `baseline` freezes the median, robust σ and instrument ceilings for all 25 measurements to `tools/spc_baseline.json`. `score` grades every vehicle PASS / FLAG / QUARANTINE with reason codes, writes `outputs/spc/spc_results.csv` (one row per vehicle, with per-servo D, flag and lot for the p-charts) and `spc_summary.json` (counts, QUARANTINE list, FLAG retest list ranked by D), and exits with code 2 if anything is quarantined. `--vehicle` prints a full z / D breakdown. Tested in `tests/test_spc_detector.py` | Done |
 | Production health dashboard | Three tabs: Fleet Overview (floor leads), SPC Charts (quality), Vehicle Lookup (flight test go/no-go) | Planned |
 
@@ -266,10 +315,12 @@ Every number in Sections 3–5 is printed by one of these two scripts:
 | [5] Control surface screen | All five surfaces compared at 500 Hz; only the left aileron diverges during the deviation (§3.2) |
 | [6] Anomaly analysis | Primary seizure 246.1–255.1 s, 27.8° gap, the 11 later episodes with times |
 | [7] Hypothesis testing | Every row of the ruled-out table in §3.4 |
-| `manufacturing_analysis.py` [2]–[4] | Build record, servo traceability, Z-scores for all 5 servos (§4.1–4.2) |
-| [6] Lot check | L2026-07B is not shifted (§4.3) |
-| [7] Same-signature scan | GLDR-200000 and the 8 borderline units (§4.3) |
-| [8] QC gap | 100% pass, 32,296 passed with exceptions, R05 count (§5) |
+| `manufacturing_analysis.py` [2] | Build record and traceability (§4.1) |
+| [3] Full record screen | Every column of the vehicle against the fleet (§4.2) |
+| [4]–[5] | Servo traceability, Z-scores for all 5 servos (§4.3) |
+| [7] Lot check | L2026-07B is not shifted (§4.4) |
+| [8] Same-signature scan | GLDR-200000 and the 8 borderline units (§4.4) |
+| [9] QC gap | 100% pass, 32,296 passed with exceptions, R05 count (§5) |
 
 The control surface screen (step [5]) uses every row at 500 Hz. For the other steps, `flight_investigation.py` reads telemetry at 10 Hz (every 50th row) outside the event window and every row at 500 Hz inside 240–265 s. The values above come from that sampling.
 

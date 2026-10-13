@@ -302,9 +302,10 @@ WHY #3: Why did the left aileron actuator seize?
 WHY #4: Why was a servo with 5.93σ abnormal friction installed on a flight vehicle?
   → Because the Quality Control acceptance process does not have statistical
     limits on servo bench test parameters. The QC station records sweep
-    current, sweep time, peak current, and backdrive torque — but the
-    automated pass/fail gate only checks whether the servo completed the
-    sweep without a hardware fault code. There is no upper specification
+    current, sweep time, peak current, and backdrive torque — but none of
+    them affects the pass decision. (Likely mechanism, to be confirmed
+    with the quality team: the gate only checks that the servo completed
+    the sweep without a hardware fault code.) There is no upper specification
     limit (USL) or statistical process control (SPC) rule that would
     reject a servo drawing 332.7 mA when the fleet average is 185 mA.
 

@@ -42,7 +42,7 @@
 - **Role of SPC:** SPC is an **alarm system**, not the mechanic. It flags that an actuator is statistically abnormal so technicians can quarantine it before assembly.
 
 ### C. The Quality Control Process Gap
-- **The Binary Trap:** Factory bench testing only checked for binary firmware fault codes. GLDR-0421's servo completed the sweep without throwing an error code, so the system stamped `PASS`.
+- **The Binary Trap (inferred):** Bench readings have no effect on the pass decision; every unit passed, including the two most extreme servos. The QC procedure isn't in the data, so the likely mechanism (the gate only checks that the sweep completed without a hardware fault code) is an inference to confirm with the quality team. See REPORT §5 and §6.3.
 - **The Parametric Reality:** The test recorded `332.70 mA` of sweep current into `manufacturing.csv`, but never evaluated the number against statistical upper limits.
 - **100% Pass Rate Red Flag:** Across all 200,000 units in `manufacturing.csv`, `final_qc_pass = 1` for **100% of vehicles** (0 rejections). In manufacturing, a 100% yield across 200,000 units is proof of an inactive or ineffective quality gate.
 - **The Rework Gap:** Unit record shows rework code `R05` (*"Updated firmware + parameter profile; repeated self-test"*). R05 is routine (~9,600 units), so it is not evidence of masking by itself — but it was a missed opportunity: a firmware reflash + self-test verifies software, not mechanical health, and no parametric re-check followed.
