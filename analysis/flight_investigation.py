@@ -5,7 +5,8 @@ Analyzes telemetry.csv and flight_plan.csv to determine what caused
 the aircraft to deviate from its planned path.
 
 Produces:
-  1. Flight timeline summary (console output)
+  1. Flight timeline, waypoint results, an all-surfaces screen and
+     hypothesis tests (console output)
   2. Figure 1: Roll command vs actual + aileron positions (the "smoking gun")
   3. Figure 2: Waypoint miss distances over time
   4. Figure 3: Altitude profile with key events annotated
@@ -65,6 +66,10 @@ def load_flight_plan(path):
 # ---------------------------------------------------------------------------
 # Step 2: Load Telemetry (sampled for analysis — every Nth row)
 # ---------------------------------------------------------------------------
+SURFACES = ["aileron_left", "aileron_right", "elevon_left", "elevon_right", "rudder"]
+DIVERGENCE_THRESHOLD_DEG = 5.0
+
+
 def load_telemetry(path, sample_rate=50):
     """
     Load telemetry.csv, keeping every `sample_rate`-th row for plotting
@@ -81,6 +86,11 @@ def load_telemetry(path, sample_rate=50):
     prev_state = None
     prev_mode = None
     row_count = 0
+    # Unbiased screen of every control surface at full 500 Hz: how far does
+    # the actual position ever get from the command, and when does it first
+    # exceed the divergence threshold?
+    screen = {name: {"max_gap_deg": 0.0, "max_gap_time_s": None, "first_over_s": None,
+                     "first_over_state": None, "samples_over": 0} for name in SURFACES}
 
     with open(path, "r") as f:
         reader = csv.DictReader(f)
@@ -97,6 +107,16 @@ def load_telemetry(path, sample_rate=50):
             if raw["control_mode"] != prev_mode:
                 mode_changes.append((t, raw["control_mode"], raw.get("failsafe_reason", "")))
                 prev_mode = raw["control_mode"]
+
+            for name in SURFACES:
+                gap = abs(float(raw[f"{name}_cmd_deg"]) - float(raw[f"{name}_actual_deg"]))
+                sc = screen[name]
+                if gap > sc["max_gap_deg"]:
+                    sc["max_gap_deg"], sc["max_gap_time_s"] = gap, t
+                if gap > DIVERGENCE_THRESHOLD_DEG:
+                    sc["samples_over"] += 1
+                    if sc["first_over_s"] is None:
+                        sc["first_over_s"], sc["first_over_state"] = t, raw["vehicle_state"]
 
             # Keep the row if: sampled OR in the critical anomaly window
             in_anomaly_window = 240.0 <= t <= 265.0
@@ -133,7 +153,17 @@ def load_telemetry(path, sample_rate=50):
                     "att_valid": int(float(raw["attitude_valid"])),
                 })
 
-    return rows, events, state_changes, mode_changes, row_count
+    return rows, events, state_changes, mode_changes, row_count, screen
+
+
+def select_suspect(screen):
+    """
+    Pick the surface that diverged from its command first. Anything that
+    diverges later is a candidate effect, not the initiating cause.
+    """
+    candidates = [(sc["first_over_s"], name) for name, sc in screen.items()
+                  if sc["first_over_s"] is not None]
+    return min(candidates)[1] if candidates else None
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +176,6 @@ def analyze_anomaly(rows, gap_tolerance_s=0.5):
     merged into one episode. The first episode is the primary seizure at
     WP-02; later episodes show the sticking recurred for the rest of flight.
     """
-    DIVERGENCE_THRESHOLD_DEG = 5.0
     episodes = []
     for r in rows:
         gap = abs(r["al_cmd"] - r["al_act"])
@@ -480,7 +509,7 @@ def main():
     print(f"    {len(waypoints)} waypoints loaded")
 
     print("\n[2] Loading telemetry (this may take 30-60 seconds)...")
-    rows, events, state_changes, mode_changes, total_rows = load_telemetry(TELEMETRY_PATH)
+    rows, events, state_changes, mode_changes, total_rows, screen = load_telemetry(TELEMETRY_PATH)
     print(f"    {total_rows:,} total rows, {len(rows):,} kept for analysis")
 
     # Flight timeline
@@ -503,8 +532,29 @@ def main():
         print(f"    {w['id']:<6} {w['target_time_s']:>7.0f}s "
               f"{w['closest_m']:>10.1f} {status:>8}")
 
+    # Screen every control surface before focusing on any one of them
+    print(f"\n[5] Control Surface Screen (all {total_rows:,} rows, |cmd − actual| > {DIVERGENCE_THRESHOLD_DEG:.0f}°):")
+    print(f"    {'Surface':<14} {'Max gap':>8} {'at t':>8} {'First >5°':>10} {'State then':<13} {'Samples >5°':>11}")
+    print(f"    {'─' * 14} {'─' * 8} {'─' * 8} {'─' * 10} {'─' * 13} {'─' * 11}")
+    for name in SURFACES:
+        sc = screen[name]
+        first = f"{sc['first_over_s']:.1f}s" if sc["first_over_s"] is not None else "never"
+        print(f"    {name:<14} {sc['max_gap_deg']:>7.1f}° {sc['max_gap_time_s']:>7.1f}s "
+              f"{first:>10} {sc['first_over_state'] or '—':<13} {sc['samples_over']:>11,}")
+    suspect = select_suspect(screen)
+    print(f"    → Suspect surface: {suspect} (first to diverge from its command).")
+    t0 = screen[suspect]["first_over_s"]
+    for name in SURFACES:
+        sc = screen[name]
+        if name != suspect and sc["first_over_s"] is not None:
+            print(f"      {name} first diverges {sc['first_over_s'] - t0:.0f}s later "
+                  f"({sc['samples_over']} samples = {sc['samples_over'] / 500 * 1000:.0f} ms at 500 Hz) — "
+                  f"after the deviation was already under way, so an effect, not the cause.")
+    if suspect != "aileron_left":
+        print("    [WARN] Screen does not point at the left aileron — detailed analysis below may not apply.")
+
     # Anomaly analysis
-    print("\n[5] Anomaly Analysis:")
+    print("\n[6] Anomaly Analysis (suspect surface in detail):")
     anomaly = analyze_anomaly(rows)
     print(f"    Left aileron divergence detected:")
     print(f"      Start:     t = {anomaly['start_s']:.1f}s")
@@ -516,7 +566,7 @@ def main():
         print(f"        t = {ep['start_s']:7.1f}s  for {ep['end_s'] - ep['start_s']:4.1f}s  max gap {ep['max_gap_deg']:4.1f}°")
 
     # Hypothesis testing
-    print("\n[6] Hypothesis Testing:")
+    print("\n[7] Hypothesis Testing:")
     results = test_hypotheses(rows, anomaly, mode_changes)
     for hyp, evidence, verdict in results:
         icon = "✅" if verdict == "CONFIRMED" else "❌"
@@ -524,7 +574,7 @@ def main():
         print(f"       {evidence}")
 
     # Generate figures
-    print("\n[7] Generating figures...")
+    print("\n[8] Generating figures...")
     generate_figures(rows, waypoints, events, anomaly, OUTPUT_DIR)
 
     # Summary

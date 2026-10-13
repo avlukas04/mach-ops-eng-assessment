@@ -36,7 +36,14 @@ For the first 246 s the aircraft flew with sub-2-meter accuracy. That rules out 
 
 ## 3. Flight Investigation
 
-**Method.** Before looking at the data, I listed every possible cause across the six standard categories of an Ishikawa (fishbone) diagram: people, machine, method, material, measurement, and environment. I then tested each one against the telemetry (500 Hz, 600,000 rows) and the flight plan. This keeps the analysis from anchoring on engineering's early suspicion. The full fishbone, fault tree, and 5 Whys are in [`docs/root_cause_analysis.md`](docs/root_cause_analysis.md).
+**Method.** Before looking at the data, I listed every possible cause across the six standard categories of an Ishikawa (fishbone) diagram: people, machine, method, material, measurement, and environment. I then worked from symptom to cause in the telemetry (500 Hz, 600,000 rows) and the flight plan:
+
+1. **Symptom and timing** (§3.1): when did the glider leave its planned path?
+2. **Screen every control surface** (§3.2): compare commanded and actual position for all five surfaces, without assuming which one failed.
+3. **Characterize the failure** (§3.3): examine the one surface the screen singles out.
+4. **Rule out the alternatives** (§3.4): test each other possible cause against the data.
+
+This keeps the analysis from anchoring on engineering's early suspicion. I first explored the flight in the provided playback viewer (`telemetry-simulation.py`), which pointed at the left aileron; every number below comes from `analysis/flight_investigation.py`, which recomputes it from the raw logs. The full fishbone, fault tree, and 5 Whys are in [`docs/root_cause_analysis.md`](docs/root_cause_analysis.md).
 
 ### 3.1 Timeline
 
@@ -52,7 +59,21 @@ For the first 246 s the aircraft flew with sub-2-meter accuracy. That rules out 
 | 1165–1182 s | Bank pattern ends. At 1182 s the autopilot enters `FAILSAFE` (reason: `NAV_PATH_DEVIATION`), a *result* of the accumulated off-track error |
 | 1198.9 s | Ground impact about 5 km off track |
 
-### 3.2 Evidence
+### 3.2 Screening every control surface
+
+The glider steers with five surfaces. A healthy surface follows its command within a degree or two, so the first test is how far each surface's actual position ever got from its command, using every 500 Hz row of the flight:
+
+| Surface | Max gap (command vs actual) | First gap > 5° | Samples > 5° |
+|:--|:--|:--|--:|
+| **Left aileron** | **27.8° at 254.9 s** | **246.1 s** (during the bank pattern) | **24,592** |
+| Right aileron | 12.0° at 1165.0 s | 1165.0 s | 13 |
+| Left elevon | 1.8° | never | 0 |
+| Right elevon | 1.8° | never | 0 |
+| Rudder | 4.0° | never | 0 |
+
+Only the left aileron diverged when the flight went wrong, and it did so tens of thousands of times. The right aileron's 13 samples (26 ms) all fall at 1165.0 s, the moment the bank pattern ended and the glider switched back to GLIDE. That is 919 s after the left aileron first stuck, by which time the glider was already kilometres off track. The elevons and rudder never left their commands by more than 4°. This screen, not the early suspicion, is what puts the left aileron under examination.
+
+### 3.3 Evidence
 
 ![Fig 1 — Left aileron seizure](outputs/figures/fig1_aileron_seizure.png)
 
@@ -66,7 +87,7 @@ For the first 246 s the aircraft flew with sub-2-meter accuracy. That rules out 
 
 **Fig 3. Altitude profile.** The descent rate stays steady through the event. The aircraft did not stall or dive; it glided normally on the wrong track. Red marks the primary seizure and amber marks the 11 later sticking episodes. Recurring sticking points to a defect that is always present in the servo, not a one-off transient.
 
-### 3.3 Causes ruled out
+### 3.4 Causes ruled out
 
 | Possible cause | Test | Result |
 |:--|:--|:--|
@@ -121,7 +142,7 @@ Taken together, these readings describe a servo that needs much more current to 
 ### 4.3 What it is not
 
 - **Not a bad supplier lot.** Lot L2026-07B (5,784 units) has a normal average sweep current, so this is a single defective unit. This matters for containment: we do not need to recall the lot, but we do need to screen individual units, because single-unit defects will keep happening.
-- **Not an assembly error.** All installation measurements for this unit are normal (Section 3.3).
+- **Not an assembly error.** All installation measurements for this unit are normal (Section 3.4).
 - **Not unique.** **GLDR-200000** shows the same signature: 304.2 mA sweep current (+4.78σ) and 367.7 mA peak current, built 2026-02-18 at OC-PLANT-2 with servo lot L2026-02B. Its plant, lot, and rework history all differ from GLDR-0421, which again points to random single-unit defects that only screening each unit can catch. **This vehicle should be held and its left aileron servo pulled for teardown.**
 - **A borderline group to retest.** Scanning the fleet for the same pattern (sweep current *and* peak current both ≥ 3σ on one servo) finds 10 vehicles. GLDR-0421 (+5.93 / +4.05) and GLDR-200000 (+4.78 / +3.11) stand well clear. The other 8 sit just over the line (3.0–3.6σ on both readings), across all five servo positions. If the two readings are independent, about 2 such units would be expected by chance, so these 8 may include milder cases of the same defect. They don't meet the QUARANTINE limit, but they should be first in line for bench retest. (Listed in `manufacturing_analysis.py` output, step [7].)
 
@@ -223,7 +244,7 @@ As discussed with the Head of Ops, these come after the basic process is fixed. 
 
 | Tool | Purpose | Status |
 |:--|:--|:--|
-| `analysis/flight_investigation.py` | Part 1 investigation: builds the flight timeline (state, mode, and events), scores the waypoints, detects every left-aileron sticking episode, computes each rule-out test from telemetry (mode, software, power, position sensor, wind/temperature, GPS/attitude), and produces Figs 1–3 | Done |
+| `analysis/flight_investigation.py` | Part 1 investigation: builds the flight timeline (state, mode, and events), scores the waypoints, screens all five control surfaces for command-vs-actual divergence, detects every left-aileron sticking episode, computes each rule-out test from telemetry (mode, software, power, position sensor, wind/temperature, GPS/attitude), and produces Figs 1–3 | Done |
 | `analysis/manufacturing_analysis.py` | Traces the crashed vehicle (`--vehicle`, default GLDR-0421) to its build record. Computes Z-scores for all 5 servos, the supplier lot check, a scan listing every vehicle with the same friction signature, and the QC gap figures (pass rate, exceptions that still passed, R05 count). Produces Figs 4–5. It is an investigation tool; the production gate is `spc_detector.py` | Done |
 | `spc_detector.py` | Command-line tool: scores every vehicle (robust high-side z, combined score D per servo) and outputs PASS / FLAG / QUARANTINE with the reason codes (`SIGNATURE`, `EXTREME`, `HIGH`, `SATURATED`) as CSV or JSON | Planned |
 | Production health dashboard | Three tabs: Fleet Overview (floor leads), SPC Charts (quality), Vehicle Lookup (flight test go/no-go) | Planned |
@@ -242,14 +263,15 @@ Every number in Sections 3–5 is printed by one of these two scripts:
 |:--|:--|
 | `flight_investigation.py` [3] Timeline | State changes, `FAILSAFE` at 1182 s, impact at 1198.9 s |
 | [4] Waypoint results | WP-01/02 hits, WP-03 to WP-21 misses (Fig 2) |
-| [5] Anomaly analysis | Primary seizure 246.1–255.1 s, 27.8° gap, the 11 later episodes with times |
-| [6] Hypothesis testing | Every row of the ruled-out table in §3.3 |
+| [5] Control surface screen | All five surfaces compared at 500 Hz; only the left aileron diverges during the deviation (§3.2) |
+| [6] Anomaly analysis | Primary seizure 246.1–255.1 s, 27.8° gap, the 11 later episodes with times |
+| [7] Hypothesis testing | Every row of the ruled-out table in §3.4 |
 | `manufacturing_analysis.py` [2]–[4] | Build record, servo traceability, Z-scores for all 5 servos (§4.1–4.2) |
 | [6] Lot check | L2026-07B is not shifted (§4.3) |
 | [7] Same-signature scan | GLDR-200000 and the 8 borderline units (§4.3) |
 | [8] QC gap | 100% pass, 32,296 passed with exceptions, R05 count (§5) |
 
-Outside the event window, `flight_investigation.py` reads telemetry at 10 Hz (every 50th row); inside 240–265 s it reads every row at 500 Hz. The values above come from that sampling.
+The control surface screen (step [5]) uses every row at 500 Hz. For the other steps, `flight_investigation.py` reads telemetry at 10 Hz (every 50th row) outside the event window and every row at 500 Hz inside 240–265 s. The values above come from that sampling.
 
 ---
 
