@@ -1,0 +1,143 @@
+{
+  "version": "2026-10-13",
+  "description": "Frozen SPC baseline for the servo bench gate. Review before changing.",
+  "reference": {
+    "source_file": "manufacturing.csv",
+    "source_sha256": "9d6b8698ec562dd3d7d5c51dae3c46009d85679963ae5bb524e56d5e63b1acde",
+    "built_before": null,
+    "n_units": 200000
+  },
+  "rules": {
+    "quarantine_d": 6.0,
+    "quarantine_z": 5.5,
+    "flag_z": 3.0,
+    "flag_d": 4.5
+  },
+  "measures": {
+    "elevon_l_servo_sweep_current_ma": {
+      "median": 185.08,
+      "sigma": 25.203855,
+      "ceiling": null
+    },
+    "elevon_l_servo_peak_current_ma": {
+      "median": 259.92,
+      "sigma": 35.122313,
+      "ceiling": 380.0
+    },
+    "elevon_l_servo_sweep_time_ms": {
+      "median": 780.22,
+      "sigma": 55.06301,
+      "ceiling": 980.0
+    },
+    "elevon_l_servo_position_error_rms_deg": {
+      "median": 0.55,
+      "sigma": 0.200148,
+      "ceiling": null
+    },
+    "elevon_l_servo_backdrive_torque_nmm": {
+      "median": 91.96,
+      "sigma": 18.042995,
+      "ceiling": 150.0
+    },
+    "elevon_r_servo_sweep_current_ma": {
+      "median": 185.05,
+      "sigma": 24.944403,
+      "ceiling": null
+    },
+    "elevon_r_servo_peak_current_ma": {
+      "median": 259.99,
+      "sigma": 35.092661,
+      "ceiling": 380.0
+    },
+    "elevon_r_servo_sweep_time_ms": {
+      "median": 779.81,
+      "sigma": 54.944403,
+      "ceiling": 980.0
+    },
+    "elevon_r_servo_position_error_rms_deg": {
+      "median": 0.55,
+      "sigma": 0.20089,
+      "ceiling": null
+    },
+    "elevon_r_servo_backdrive_torque_nmm": {
+      "median": 91.97,
+      "sigma": 18.042995,
+      "ceiling": 150.0
+    },
+    "aileron_l_servo_sweep_current_ma": {
+      "median": 185.11,
+      "sigma": 24.93699,
+      "ceiling": null
+    },
+    "aileron_l_servo_peak_current_ma": {
+      "median": 259.95,
+      "sigma": 34.862861,
+      "ceiling": 380.0
+    },
+    "aileron_l_servo_sweep_time_ms": {
+      "median": 779.96,
+      "sigma": 55.064863,
+      "ceiling": 980.0
+    },
+    "aileron_l_servo_position_error_rms_deg": {
+      "median": 0.55,
+      "sigma": 0.20089,
+      "ceiling": null
+    },
+    "aileron_l_servo_backdrive_torque_nmm": {
+      "median": 91.99,
+      "sigma": 18.00593,
+      "ceiling": 150.0
+    },
+    "aileron_r_servo_sweep_current_ma": {
+      "median": 184.86,
+      "sigma": 25.011119,
+      "ceiling": null
+    },
+    "aileron_r_servo_peak_current_ma": {
+      "median": 260.04,
+      "sigma": 35.048184,
+      "ceiling": 380.0
+    },
+    "aileron_r_servo_sweep_time_ms": {
+      "median": 780.16,
+      "sigma": 54.975908,
+      "ceiling": 980.0
+    },
+    "aileron_r_servo_position_error_rms_deg": {
+      "median": 0.55,
+      "sigma": 0.200148,
+      "ceiling": null
+    },
+    "aileron_r_servo_backdrive_torque_nmm": {
+      "median": 91.9,
+      "sigma": 17.946627,
+      "ceiling": 150.0
+    },
+    "rudder_servo_sweep_current_ma": {
+      "median": 185.07,
+      "sigma": 25.040771,
+      "ceiling": null
+    },
+    "rudder_servo_peak_current_ma": {
+      "median": 259.98,
+      "sigma": 35.159377,
+      "ceiling": 380.0
+    },
+    "rudder_servo_sweep_time_ms": {
+      "median": 779.8,
+      "sigma": 55.06301,
+      "ceiling": 980.0
+    },
+    "rudder_servo_position_error_rms_deg": {
+      "median": 0.549,
+      "sigma": 0.199407,
+      "ceiling": null
+    },
+    "rudder_servo_backdrive_torque_nmm": {
+      "median": 91.88,
+      "sigma": 18.013343,
+      "ceiling": 150.0
+    }
+  }
+}

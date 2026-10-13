@@ -34,10 +34,10 @@
 - **What is SPC?** A mathematical framework (Walter Shewhart, Bell Labs) establishing that identical manufactured parts follow a stable normal distribution. Measurements falling far into the tails indicate *assignable causes* of error.
 - **Why $\pm 3\sigma$?** In a Gaussian distribution, $99.73\%$ of parts fall within $\pm 3\sigma$. Only $0.27\%$ fall outside by chance. It is the standard Shewhart limit *for a single chart*.
 - **Gate design (decided 2026-10-13, see REPORT.md §6.1):** two tiers, scored on a *robust, high-side* basis.
-  - Baseline per metric: median and σ̂ = IQR/1.349 (frozen). z = max(0, (x − median)/σ̂). Reason: all metrics are clipped at an instrument floor (and backdrive at 150 N·mm, sweep time at 980 ms), which shrinks the plain σ and inflated position-error Z. Skew is negligible (≤ 0.2); clipping was the actual problem.
+  - Baseline per metric: median and σ̂ = IQR/1.349 (frozen). z = max(0, (x − median)/σ̂). Reason: all metrics are clipped at an instrument floor (and capped at ceilings: backdrive 150 N·mm, sweep time 980 ms, peak current 380 mA), which shrinks the plain σ and inflated position-error Z. Skew is negligible (≤ 0.2); clipping was the actual problem.
   - Bench metrics are **uncorrelated** (|r| ≤ 0.01), so a combined score per servo D = √Σz² over its 5 metrics has a known null distribution.
   - **QUARANTINE:** any servo D ≥ 6.0 OR any z ≥ 5.5 (each < 0.1 expected false alarms per 200k) → exactly **2 units: GLDR-0421 (D = 8.57), GLDR-200000 (D = 7.31)**; next-highest servo is 5.80.
-  - **FLAG:** any z ≥ 3, D ≥ 4.5, or saturated reading → 6,498 (3.25%). That's about the chance rate (~6,640 expected), so FLAG drives lot/line/shift p-charts, not per-unit holds. 731 vehicles have a saturated reading (tag `SATURATED`).
+  - **FLAG:** any z ≥ 3, D ≥ 4.5, or saturated reading → 6,498 (3.25%). That's about the chance rate (~6,640 expected), so FLAG drives lot/line/shift p-charts, not per-unit holds. 1,028 vehicles have a saturated reading (tag `SATURATED`); the 380 mA peak-current ceiling was found while building `tools/spc_detector.py` and was missing from the earlier count of 731.
   - Superseded: single |Z| ≥ 4.5 gate (14 units, 12 of them position-error-only and consistent with chance).
 - **Role of SPC:** SPC is an **alarm system**, not the mechanic. It flags that an actuator is statistically abnormal so technicians can quarantine it before assembly.
 

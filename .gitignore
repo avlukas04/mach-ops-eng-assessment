@@ -16,3 +16,6 @@ ENV/
 # System files
 .DS_Store
 Thumbs.db
+
+# Generated SPC results (rebuild with tools/spc_detector.py score)
+outputs/spc/spc_results.csv

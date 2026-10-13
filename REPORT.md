@@ -14,7 +14,7 @@ The defect was present on the factory bench before the flight. At final test, th
 
 1. **Do not just repeat the test with other production units.** The data shows one more unit built with the same signature (GLDR-200000: 304.2 mA, +4.78σ, built at a different plant from a different servo lot). It should be held now.
 2. **Add a two-tier statistical check (SPC) on 25 servo bench measurements (Section 6):**
-   - **QUARANTINE (blocks shipment):** a combined friction score on any one servo of D ≥ 6.0, or any single measurement ≥ 5.5σ. On the current fleet this holds exactly **2 of 200,000 units**: GLDR-0421 and GLDR-200000. The expected false-alarm rate is under 0.1 units per 200,000.
+   - **QUARANTINE (blocks shipment):** a combined friction score on any one servo of D ≥ 6.0, or any single measurement ≥ 5.5σ. On the current fleet this holds exactly **2 of 200,000 units**: GLDR-0421 and GLDR-200000. The expected false-alarm rate is about 0.1 units per 200,000.
    - **FLAG (does not block):** any measurement ≥ 3σ. These units (3.25%) feed lot, line, and shift trend charts instead of being reviewed one by one.
 3. **Fix the gate logic.** A unit with logged QC exceptions should not be able to receive `final_qc_pass = 1`.
 
@@ -200,7 +200,7 @@ Across the 200,000 healthy units these five measurements are **uncorrelated** (|
 | **FLAG** | Any z ≥ 3, any D ≥ 4.5, or any reading stuck at the instrument limit | Ships. Logged with the reason. Feeds the trend charts by lot, line, and shift (below) | 6,498 (3.25%) |
 | **PASS** | Everything else | — | 193,500 |
 
-Both QUARANTINE limits are set so that **fewer than 0.1 false alarms are expected across all 200,000 vehicles**. For D, that's a per-servo false-alarm rate of 1×10⁻⁷. Both known defect units clear the limit easily.
+Both QUARANTINE limits are set so that **about 0.1 false alarms are expected across all 200,000 vehicles** (0.10 for D, 0.095 for z). For D, that's a per-servo false-alarm rate of 1.0×10⁻⁷; for a single reading, P(z ≥ 5.5) = 1.9×10⁻⁸ across 5 million readings. Both known defect units clear the limit easily.
 
 #### Why this replaced the first version (single |Z| ≥ 4.5)
 
@@ -218,7 +218,7 @@ The FLAG count (6,484 units with some z ≥ 3) is almost exactly what chance pre
 
 #### Readings stuck at the instrument limit
 
-Backdrive torque tops out at 150 N·mm, and sweep time at 980 ms. **731 vehicles** have at least one reading at that ceiling, so their true value is unknown and may be higher. All of them already FLAG on z ≥ 3. They are tagged `SATURATED` so quality can see them, and the fixture's range should be extended so these servos can actually be measured.
+Three measurements have an instrument ceiling, where readings pile up on one value: backdrive torque at 150 N·mm, sweep time at 980 ms, and peak current at 380 mA, on all five servo positions. **1,028 vehicles** have at least one reading at a ceiling, so their true value is unknown and may be higher. All of them already FLAG on z ≥ 3. The only reading in the fleet *above* a ceiling is GLDR-0421's left aileron peak current (400.32 mA, against the 380 mA limit), so that reading was itself out of range for the fixture and should have stopped the unit. They are tagged `SATURATED` so quality can see them, and the fixture's range should be extended so these servos can actually be measured.
 
 ### 6.2 Making it work in production
 
@@ -240,19 +240,19 @@ As discussed with the Head of Ops, these come after the basic process is fixed. 
 
 ## 7. Tools Built
 
-> *Part 2 tools are in progress. This section will be completed when they ship.*
+> *The production dashboard is still in progress. This section will be completed when it ships.*
 
 | Tool | Purpose | Status |
 |:--|:--|:--|
 | `analysis/flight_investigation.py` | Part 1 investigation: builds the flight timeline (state, mode, and events), scores the waypoints, screens all five control surfaces for command-vs-actual divergence, detects every left-aileron sticking episode, computes each rule-out test from telemetry (mode, software, power, position sensor, wind/temperature, GPS/attitude), and produces Figs 1–3 | Done |
 | `analysis/manufacturing_analysis.py` | Traces the crashed vehicle (`--vehicle`, default GLDR-0421) to its build record. Computes Z-scores for all 5 servos, the supplier lot check, a scan listing every vehicle with the same friction signature, and the QC gap figures (pass rate, exceptions that still passed, R05 count). Produces Figs 4–5. It is an investigation tool; the production gate is `spc_detector.py` | Done |
-| `spc_detector.py` | Command-line tool: scores every vehicle (robust high-side z, combined score D per servo) and outputs PASS / FLAG / QUARANTINE with the reason codes (`SIGNATURE`, `EXTREME`, `HIGH`, `SATURATED`) as CSV or JSON | Planned |
+| `tools/spc_detector.py` | The production gate (§6.1). `baseline` freezes the median, robust σ and instrument ceilings for all 25 measurements to `tools/spc_baseline.json`. `score` grades every vehicle PASS / FLAG / QUARANTINE with reason codes, writes `outputs/spc/spc_results.csv` (one row per vehicle, with per-servo D, flag and lot for the p-charts) and `spc_summary.json` (counts, QUARANTINE list, FLAG retest list ranked by D), and exits with code 2 if anything is quarantined. `--vehicle` prints a full z / D breakdown. Tested in `tests/test_spc_detector.py` | Done |
 | Production health dashboard | Three tabs: Fleet Overview (floor leads), SPC Charts (quality), Vehicle Lookup (flight test go/no-go) | Planned |
 
 **Running the Part 1 investigation** (from the repository root, with `telemetry.csv`, `flight_plan.csv`, and `manufacturing.csv` present; Python 3.9 or later):
 
 ```bash
-pip install matplotlib numpy
+pip install matplotlib numpy pandas
 python3 analysis/flight_investigation.py                         # about 1 min, writes Figs 1–3
 python3 analysis/manufacturing_analysis.py --vehicle GLDR-0421   # about 1 min, writes Figs 4–5
 ```
@@ -272,6 +272,27 @@ Every number in Sections 3–5 is printed by one of these two scripts:
 | [8] QC gap | 100% pass, 32,296 passed with exceptions, R05 count (§5) |
 
 The control surface screen (step [5]) uses every row at 500 Hz. For the other steps, `flight_investigation.py` reads telemetry at 10 Hz (every 50th row) outside the event window and every row at 500 Hz inside 240–265 s. The values above come from that sampling.
+
+**Running the SPC gate** (about 5 s each):
+
+```bash
+python3 tools/spc_detector.py baseline                       # freeze the baseline (already committed; rerun only after review)
+python3 tools/spc_detector.py score                          # grade all 200,000 vehicles, write outputs/spc/
+python3 tools/spc_detector.py score --vehicle GLDR-0421      # z / D breakdown for one vehicle
+python3 -m unittest discover -s tests -v                     # 13 rule tests on synthetic data
+```
+
+| Tier | Reason code | Rule | Vehicles |
+|:--|:--|:--|--:|
+| QUARANTINE | `SIGNATURE` | D ≥ 6.0 on one servo | 2 |
+| | `EXTREME` | any single z ≥ 5.5 | 1 (GLDR-0421) |
+| | `INCOMPLETE` | a required reading is missing; the gate fails closed | 0 |
+| FLAG | `HIGH` | any z ≥ 3.0 | 6,484 |
+| | `ELEVATED` | D ≥ 4.5 on one servo | 119 |
+| | `SATURATED` | a reading at an instrument ceiling | 1,028 |
+| PASS | | none of the above | 193,500 |
+
+A vehicle can carry several reasons, so the reason counts overlap; the tier is set by the most severe one. Totals: 2 QUARANTINE, 6,498 FLAG, 193,500 PASS.
 
 ---
 

@@ -1,0 +1,193 @@
+{
+  "generated_utc": "2026-10-13T21:56:16+00:00",
+  "input_file": "manufacturing.csv",
+  "baseline_version": "2026-10-13",
+  "baseline_reference_sha256": "9d6b8698ec562dd3d7d5c51dae3c46009d85679963ae5bb524e56d5e63b1acde",
+  "rules": {
+    "quarantine_d": 6.0,
+    "quarantine_z": 5.5,
+    "flag_z": 3.0,
+    "flag_d": 4.5
+  },
+  "n_vehicles": 200000,
+  "counts": {
+    "QUARANTINE": 2,
+    "FLAG": 6498,
+    "PASS": 193500
+  },
+  "flag_rate": 0.03249,
+  "vehicles_with_reason": {
+    "SIGNATURE": 2,
+    "EXTREME": 1,
+    "INCOMPLETE": 0,
+    "HIGH": 6484,
+    "ELEVATED": 119,
+    "SATURATED": 1028
+  },
+  "quarantine": [
+    {
+      "vehicle_id": "GLDR-0421",
+      "worst_servo": "aileron_l",
+      "worst_d": 8.569,
+      "reasons": "SIGNATURE aileron_l D=8.57; EXTREME aileron_l.sweep_current_ma z=5.92; HIGH aileron_l.peak_current_ma z=4.03; SATURATED aileron_l.peak_current_ma"
+    },
+    {
+      "vehicle_id": "GLDR-200000",
+      "worst_servo": "aileron_l",
+      "worst_d": 7.311,
+      "reasons": "SIGNATURE aileron_l D=7.31; HIGH aileron_l.sweep_current_ma z=4.78; HIGH aileron_l.peak_current_ma z=3.09"
+    }
+  ],
+  "flag_retest_priority": [
+    {
+      "vehicle_id": "GLDR-4434",
+      "worst_servo": "elevon_l",
+      "worst_d": 5.798,
+      "reasons": "ELEVATED elevon_l D=5.80; HIGH elevon_l.sweep_current_ma z=3.12; HIGH elevon_l.peak_current_ma z=3.42; SATURATED elevon_l.peak_current_ma; HIGH elevon_l.position_error_rms_deg z=3.25"
+    },
+    {
+      "vehicle_id": "GLDR-189952",
+      "worst_servo": "elevon_l",
+      "worst_d": 5.313,
+      "reasons": "ELEVATED elevon_l D=5.31; HIGH elevon_l.position_error_rms_deg z=3.41"
+    },
+    {
+      "vehicle_id": "GLDR-101686",
+      "worst_servo": "aileron_l",
+      "worst_d": 5.24,
+      "reasons": "ELEVATED aileron_l D=5.24; HIGH aileron_l.position_error_rms_deg z=3.66"
+    },
+    {
+      "vehicle_id": "GLDR-157888",
+      "worst_servo": "aileron_l",
+      "worst_d": 5.19,
+      "reasons": "ELEVATED aileron_l D=5.19; HIGH aileron_l.sweep_current_ma z=3.45"
+    },
+    {
+      "vehicle_id": "GLDR-144678",
+      "worst_servo": "elevon_r",
+      "worst_d": 5.146,
+      "reasons": "ELEVATED elevon_r D=5.15; HIGH elevon_r.peak_current_ma z=3.42; SATURATED elevon_r.peak_current_ma; HIGH elevon_r.sweep_time_ms z=3.40"
+    },
+    {
+      "vehicle_id": "GLDR-156403",
+      "worst_servo": "elevon_r",
+      "worst_d": 5.099,
+      "reasons": "ELEVATED elevon_r D=5.10; HIGH elevon_r.sweep_current_ma z=3.51; HIGH elevon_r.position_error_rms_deg z=3.41"
+    },
+    {
+      "vehicle_id": "GLDR-104875",
+      "worst_servo": "elevon_r",
+      "worst_d": 5.092,
+      "reasons": "ELEVATED elevon_r D=5.09; HIGH elevon_r.peak_current_ma z=3.04; HIGH elevon_r.backdrive_torque_nmm z=3.15"
+    },
+    {
+      "vehicle_id": "GLDR-115974",
+      "worst_servo": "aileron_r",
+      "worst_d": 4.955,
+      "reasons": "ELEVATED aileron_r D=4.96; HIGH aileron_r.sweep_current_ma z=4.09"
+    },
+    {
+      "vehicle_id": "GLDR-77670",
+      "worst_servo": "rudder",
+      "worst_d": 4.95,
+      "reasons": "ELEVATED rudder D=4.95; HIGH rudder.position_error_rms_deg z=4.49"
+    },
+    {
+      "vehicle_id": "GLDR-123944",
+      "worst_servo": "aileron_r",
+      "worst_d": 4.946,
+      "reasons": "ELEVATED aileron_r D=4.95; HIGH aileron_r.sweep_current_ma z=3.28; HIGH aileron_r.backdrive_torque_nmm z=3.12"
+    },
+    {
+      "vehicle_id": "GLDR-127172",
+      "worst_servo": "rudder",
+      "worst_d": 4.942,
+      "reasons": "ELEVATED rudder D=4.94; HIGH rudder.position_error_rms_deg z=4.00"
+    },
+    {
+      "vehicle_id": "GLDR-99814",
+      "worst_servo": "elevon_l",
+      "worst_d": 4.938,
+      "reasons": "ELEVATED elevon_l D=4.94; HIGH elevon_l.peak_current_ma z=3.42; SATURATED elevon_l.peak_current_ma"
+    },
+    {
+      "vehicle_id": "GLDR-179950",
+      "worst_servo": "elevon_l",
+      "worst_d": 4.937,
+      "reasons": "ELEVATED elevon_l D=4.94; HIGH elevon_l.position_error_rms_deg z=4.17"
+    },
+    {
+      "vehicle_id": "GLDR-49616",
+      "worst_servo": "elevon_l",
+      "worst_d": 4.932,
+      "reasons": "ELEVATED elevon_l D=4.93; HIGH elevon_l.sweep_current_ma z=3.19; HIGH elevon_l.position_error_rms_deg z=3.20"
+    },
+    {
+      "vehicle_id": "GLDR-182784",
+      "worst_servo": "rudder",
+      "worst_d": 4.926,
+      "reasons": "ELEVATED rudder D=4.93; HIGH rudder.sweep_current_ma z=3.72; HIGH rudder.backdrive_torque_nmm z=3.11"
+    },
+    {
+      "vehicle_id": "GLDR-65256",
+      "worst_servo": "elevon_l",
+      "worst_d": 4.921,
+      "reasons": "ELEVATED elevon_l D=4.92; HIGH elevon_l.backdrive_torque_nmm z=3.22; SATURATED elevon_l.backdrive_torque_nmm"
+    },
+    {
+      "vehicle_id": "GLDR-127171",
+      "worst_servo": "aileron_l",
+      "worst_d": 4.906,
+      "reasons": "ELEVATED aileron_l D=4.91"
+    },
+    {
+      "vehicle_id": "GLDR-72169",
+      "worst_servo": "rudder",
+      "worst_d": 4.904,
+      "reasons": "ELEVATED rudder D=4.90; HIGH rudder.backdrive_torque_nmm z=3.17"
+    },
+    {
+      "vehicle_id": "GLDR-1018",
+      "worst_servo": "rudder",
+      "worst_d": 4.893,
+      "reasons": "ELEVATED rudder D=4.89; HIGH rudder.position_error_rms_deg z=4.42"
+    },
+    {
+      "vehicle_id": "GLDR-107027",
+      "worst_servo": "elevon_l",
+      "worst_d": 4.887,
+      "reasons": "ELEVATED elevon_l D=4.89; HIGH elevon_l.sweep_current_ma z=3.78"
+    },
+    {
+      "vehicle_id": "GLDR-128004",
+      "worst_servo": "aileron_l",
+      "worst_d": 4.871,
+      "reasons": "ELEVATED aileron_l D=4.87; HIGH aileron_l.sweep_time_ms z=3.31; HIGH aileron_l.backdrive_torque_nmm z=3.22; SATURATED aileron_l.backdrive_torque_nmm"
+    },
+    {
+      "vehicle_id": "GLDR-175962",
+      "worst_servo": "elevon_r",
+      "worst_d": 4.866,
+      "reasons": "ELEVATED elevon_r D=4.87; HIGH elevon_r.peak_current_ma z=3.42; SATURATED elevon_r.peak_current_ma"
+    },
+    {
+      "vehicle_id": "GLDR-68591",
+      "worst_servo": "rudder",
+      "worst_d": 4.85,
+      "reasons": "ELEVATED rudder D=4.85"
+    },
+    {
+      "vehicle_id": "GLDR-73666",
+      "worst_servo": "elevon_r",
+      "worst_d": 4.845,
+      "reasons": "ELEVATED elevon_r D=4.85; HIGH elevon_r.sweep_current_ma z=3.60; HIGH elevon_r.peak_current_ma z=3.15"
+    },
+    {
+      "vehicle_id": "GLDR-105773",
+      "worst_servo": "elevon_r",
+      "worst_d": 4.829,
+      "reasons": "ELEVATED elevon_r D=4.83; HIGH elevon_r.sweep_current_ma z=3.58"
+    }
+  ]
+}
