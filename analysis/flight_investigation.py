@@ -77,7 +77,9 @@ def load_telemetry(path, sample_rate=50):
     rows = []
     events = []
     state_changes = []
+    mode_changes = []
     prev_state = None
+    prev_mode = None
     row_count = 0
 
     with open(path, "r") as f:
@@ -92,6 +94,9 @@ def load_telemetry(path, sample_rate=50):
             if raw["vehicle_state"] != prev_state:
                 state_changes.append((t, raw["vehicle_state"]))
                 prev_state = raw["vehicle_state"]
+            if raw["control_mode"] != prev_mode:
+                mode_changes.append((t, raw["control_mode"], raw.get("failsafe_reason", "")))
+                prev_mode = raw["control_mode"]
 
             # Keep the row if: sampled OR in the critical anomaly window
             in_anomaly_window = 240.0 <= t <= 265.0
@@ -119,42 +124,55 @@ def load_telemetry(path, sample_rate=50):
                     "failsafe": raw.get("failsafe_reason", ""),
                     "pos_n": float(raw["pos_n_m"]) if raw["pos_n_m"] else 0,
                     "pos_e": float(raw["pos_e_m"]) if raw["pos_e_m"] else 0,
+                    "wind": float(raw["wind_est_speed_mps"]),
+                    "temp_c": float(raw["outside_temp_c"]),
+                    "accel_z": float(raw["accel_z_filt_mps2"]),
+                    "gps_fix": int(float(raw["gps_fix_type"])),
+                    "gps_sats": int(float(raw["gps_sats"])),
+                    "gps_hdop": float(raw["gps_hdop"]),
+                    "att_valid": int(float(raw["attitude_valid"])),
                 })
 
-    return rows, events, state_changes, row_count
+    return rows, events, state_changes, mode_changes, row_count
 
 
 # ---------------------------------------------------------------------------
 # Step 3: Analyze the Anomaly — Quantify the Left Aileron Divergence
 # ---------------------------------------------------------------------------
-def analyze_anomaly(rows):
+def analyze_anomaly(rows, gap_tolerance_s=0.5):
     """
-    Find the time window where aileron_left_actual diverges from
-    aileron_left_cmd, quantify the duration, and identify breakaway.
+    Find every episode where aileron_left_actual diverges from
+    aileron_left_cmd by > 5 deg. Gaps shorter than `gap_tolerance_s` are
+    merged into one episode. The first episode is the primary seizure at
+    WP-02; later episodes show the sticking recurred for the rest of flight.
     """
-    # Define "divergence" as cmd-actual gap > 5 degrees
     DIVERGENCE_THRESHOLD_DEG = 5.0
-    divergence_start = None
-    divergence_end = None
-    max_gap = 0.0
-    max_gap_time = 0.0
-
+    episodes = []
     for r in rows:
         gap = abs(r["al_cmd"] - r["al_act"])
-        if gap > DIVERGENCE_THRESHOLD_DEG:
-            if divergence_start is None:
-                divergence_start = r["t"]
-            divergence_end = r["t"]
-            if gap > max_gap:
-                max_gap = gap
-                max_gap_time = r["t"]
+        if gap <= DIVERGENCE_THRESHOLD_DEG:
+            continue
+        if episodes and r["t"] - episodes[-1]["end_s"] <= gap_tolerance_s:
+            ep = episodes[-1]
+            ep["end_s"] = r["t"]
+            if gap > ep["max_gap_deg"]:
+                ep["max_gap_deg"], ep["max_gap_time_s"] = gap, r["t"]
+        else:
+            episodes.append({"start_s": r["t"], "end_s": r["t"],
+                             "max_gap_deg": gap, "max_gap_time_s": r["t"]})
 
+    if not episodes:
+        return {"start_s": None, "end_s": None, "duration_s": 0,
+                "max_gap_deg": 0, "max_gap_time_s": 0, "episodes": []}
+
+    first = episodes[0]
     return {
-        "start_s": divergence_start,
-        "end_s": divergence_end,
-        "duration_s": round(divergence_end - divergence_start, 2) if divergence_start and divergence_end else 0,
-        "max_gap_deg": round(max_gap, 2),
-        "max_gap_time_s": round(max_gap_time, 2),
+        "start_s": first["start_s"],
+        "end_s": first["end_s"],
+        "duration_s": round(first["end_s"] - first["start_s"], 2),
+        "max_gap_deg": first["max_gap_deg"],
+        "max_gap_time_s": round(first["max_gap_time_s"], 2),
+        "episodes": episodes,
     }
 
 
@@ -226,6 +244,7 @@ def generate_figures(rows, waypoints, events, anomaly, output_dir):
               linewidth=1.0, alpha=0.6, label="Right Aileron ACTUAL")
     ax1b.axvspan(anomaly["start_s"], anomaly["end_s"], alpha=0.15, color=RED)
     ax1b.axhline(0, color=GRID_COLOR, linewidth=0.5)
+    ax1b.set_xlim(min(t_vals), max(t_vals))
     ax1b.set_xlabel("Time (seconds)", color=TEXT_COLOR)
     ax1b.set_ylabel("Aileron Deflection (degrees)", color=TEXT_COLOR)
     ax1b.legend(loc="lower left", fontsize=9, facecolor=BG_COLOR,
@@ -283,8 +302,9 @@ def generate_figures(rows, waypoints, events, anomaly, output_dir):
     # ====================================================================
     # FIGURE 3: Altitude Profile with Events
     # ====================================================================
-    # Use only sampled rows for the full-flight view
-    sampled = [r for r in rows if r["t"] % 2.0 < 0.05]
+    # rows is already decimated (every 50th sample = 10 Hz) outside the
+    # anomaly window, which is plenty for a full-flight altitude trace
+    sampled = rows
 
     fig3, ax3 = plt.subplots(figsize=(14, 5))
     fig3.patch.set_facecolor(BG_COLOR)
@@ -304,13 +324,21 @@ def generate_figures(rows, waypoints, events, anomaly, output_dir):
         if ev_name in event_annotations:
             label, color = event_annotations[ev_name]
             ax3.axvline(t_ev, color=color, linewidth=1, linestyle="--", alpha=0.7)
-            ax3.annotate(label, xy=(t_ev, 1400), fontsize=8, color=color,
+            # IMPACT sits ~34 s after BANK_PATTERN_EXIT; drop it lower so
+            # the two labels don't collide
+            y = 1250 if ev_name == "IMPACT_DETECTED" else 1400
+            ax3.annotate(label, xy=(t_ev, y), fontsize=8, color=color,
                          ha="center", rotation=0)
 
-    # Mark the anomaly window
-    ax3.axvspan(anomaly["start_s"], anomaly["end_s"], alpha=0.2, color=RED)
-    ax3.annotate("Aileron\nSeizure", xy=(250, 1250), fontsize=9, color=RED,
-                 ha="center", fontweight="bold")
+    # Mark the primary seizure and the later recurrences
+    ax3.axvspan(anomaly["start_s"], anomaly["end_s"], alpha=0.35, color=RED,
+                label=f'Primary seizure ({anomaly["duration_s"]}s)')
+    for i, ep in enumerate(anomaly["episodes"][1:]):
+        ax3.axvspan(ep["start_s"], max(ep["end_s"], ep["start_s"] + 1.5),
+                    alpha=0.25, color=YELLOW,
+                    label="Recurring sticking (>5° gap)" if i == 0 else None)
+    ax3.legend(loc="lower left", fontsize=9, facecolor=BG_COLOR,
+               edgecolor=GRID_COLOR, labelcolor=TEXT_COLOR)
 
     ax3.set_xlabel("Time (seconds)", color=TEXT_COLOR)
     ax3.set_ylabel("Altitude AGL (meters)", color=TEXT_COLOR)
@@ -330,7 +358,7 @@ def generate_figures(rows, waypoints, events, anomaly, output_dir):
 # ---------------------------------------------------------------------------
 # Step 5: Hypothesis Testing — Check Alternative Causes
 # ---------------------------------------------------------------------------
-def test_hypotheses(rows, anomaly):
+def test_hypotheses(rows, anomaly, mode_changes):
     """
     Systematically test each alternative hypothesis using telemetry data.
     Returns a list of (hypothesis, evidence, verdict) tuples.
@@ -341,6 +369,19 @@ def test_hypotheses(rows, anomaly):
         return []
 
     results = []
+
+    # H0: Operator / mode — was the vehicle autonomous through the anomaly?
+    modes_in_window = {r["mode"] for r in anom}
+    failsafe = [(t, mode, why) for t, mode, why in mode_changes if mode != "AUTO_STABILIZE"]
+    fs_text = (f"First mode change: {failsafe[0][1]} at t = {failsafe[0][0]:.0f}s "
+               f"(reason: {failsafe[0][2] or 'n/a'}), {failsafe[0][0] - anomaly['start_s']:.0f}s "
+               f"after the anomaly began — a consequence, not a cause." if failsafe
+               else "No mode change for the whole flight.")
+    results.append((
+        "Operator / Mode Change",
+        f"Control mode during anomaly: {', '.join(sorted(modes_in_window))}. {fs_text}",
+        "ELIMINATED" if modes_in_window == {"AUTO_STABILIZE"} else "POSSIBLE"
+    ))
 
     # H1: Software bug — did the autopilot fail to issue the command?
     cmd_issued = any(r["al_cmd"] > 10.0 for r in anom)
@@ -365,39 +406,60 @@ def test_hypotheses(rows, anomaly):
     ))
 
     # H3: Sensor / feedback error — did the plane physically roll?
-    max_roll_achieved = max(r["roll"] for r in anom)
+    # Only look before breakaway: once the surface snaps free the roll
+    # catches up, which says nothing about whether it was stuck before
+    stuck = [r for r in anom if r["t"] <= anomaly["max_gap_time_s"]]
+    max_roll_achieved = max(r["roll"] for r in stuck)
     results.append((
         "Sensor Feedback Error (servo moved but sensor lied)",
         f"If the servo had physically moved, the aircraft would have rolled "
-        f"to ~{max(r['roll_sp'] for r in anom):.1f}°. Actual roll only reached "
+        f"to ~{max(r['roll_sp'] for r in stuck):.1f}°. Actual roll only reached "
         f"{max_roll_achieved:.1f}° — confirming surface was truly stuck.",
         "ELIMINATED"
     ))
 
-    # H4: Environmental — wind gust
-    # No direct wind column in our sample, but we can check roll disturbances
-    # before the anomaly window
+    # H4: Environmental — wind, turbulence, icing (200–300 s around the event)
+    env = [r for r in rows if 200 <= r["t"] <= 300]
     pre_anom = [r for r in rows if 200 <= r["t"] < 240]
-    if pre_anom:
+    if env and pre_anom:
         max_roll_err_pre = max(abs(r["roll_err"]) for r in pre_anom)
+        wind_max = max(r["wind"] for r in env)
+        az_lo, az_hi = min(r["accel_z"] for r in env), max(r["accel_z"] for r in env)
+        t_lo, t_hi = min(r["temp_c"] for r in env), max(r["temp_c"] for r in env)
+        calm = wind_max < 8.0 and az_lo > 7.0 and az_hi < 12.0 and t_lo > 2.0
         results.append((
-            "Wind Gust / Turbulence",
-            f"Max roll error in the 40s before anomaly: {max_roll_err_pre:.1f}° "
-            f"(small — indicates calm conditions). "
-            f"WP-01 and WP-02 hit with 1.2m and 1.3m precision.",
-            "ELIMINATED"
+            "Wind Gust / Turbulence / Icing",
+            f"Wind {min(r['wind'] for r in env):.1f}–{wind_max:.1f} m/s, "
+            f"vertical accel {az_lo:.1f}–{az_hi:.1f} m/s² (no gust spikes), "
+            f"outside temp {t_lo:.1f}–{t_hi:.1f} °C (no icing). "
+            f"Max roll error in the 40s before anomaly: {max_roll_err_pre:.2f}°.",
+            "ELIMINATED" if calm else "POSSIBLE"
         ))
+
+    # H4b: Navigation / attitude sensors
+    gps_ok = all(r["gps_fix"] == 3 for r in env)
+    att_ok = all(r["att_valid"] == 1 for r in env)
+    results.append((
+        "Navigation / Attitude Sensor Fault",
+        f"GPS fix type 3 throughout: {'yes' if gps_ok else 'NO'}; "
+        f"satellites {min(r['gps_sats'] for r in env)}–{max(r['gps_sats'] for r in env)}; "
+        f"HDOP ≤ {max(r['gps_hdop'] for r in env):.2f}; "
+        f"attitude_valid = 1 throughout: {'yes' if att_ok else 'NO'}.",
+        "ELIMINATED" if (gps_ok and att_ok) else "POSSIBLE"
+    ))
 
     # H5: Mechanical — LEFT AILERON SEIZURE
     max_gap = max(abs(r["al_cmd"] - r["al_act"]) for r in anom)
+    max_gap_r = max(abs(r["ar_cmd"] - r["ar_act"]) for r in anom)
     sat_count = sum(1 for r in anom if r["sat_roll"] == 1)
     sat_pct = (sat_count / len(anom)) * 100 if anom else 0
+    n_later = len(anomaly["episodes"]) - 1
     results.append((
         "Left Aileron Mechanical Seizure",
-        f"Command-vs-actual gap: {max_gap:.1f}°. "
+        f"Command-vs-actual gap: {max_gap:.1f}° (right aileron, same bus: max {max_gap_r:.1f}°). "
         f"Controller saturated {sat_pct:.0f}% of anomaly window. "
         f"Duration: {anomaly['duration_s']}s. "
-        f"Right aileron tracked within 1° throughout.",
+        f"Sticking recurred {n_later} more times later in the flight.",
         "CONFIRMED"
     ))
 
@@ -418,7 +480,7 @@ def main():
     print(f"    {len(waypoints)} waypoints loaded")
 
     print("\n[2] Loading telemetry (this may take 30-60 seconds)...")
-    rows, events, state_changes, total_rows = load_telemetry(TELEMETRY_PATH)
+    rows, events, state_changes, mode_changes, total_rows = load_telemetry(TELEMETRY_PATH)
     print(f"    {total_rows:,} total rows, {len(rows):,} kept for analysis")
 
     # Flight timeline
@@ -427,6 +489,8 @@ def main():
     print(f"    {'─' * 8}  {'─' * 30}")
     for t, state in state_changes:
         print(f"    {t:8.1f}s  State → {state}")
+    for t, mode, why in mode_changes:
+        print(f"    {t:8.1f}s  Mode  → {mode}" + (f" ({why})" if why else ""))
     for t, ev in events:
         print(f"    {t:8.1f}s  EVENT: {ev}")
 
@@ -447,10 +511,13 @@ def main():
     print(f"      End:       t = {anomaly['end_s']:.1f}s")
     print(f"      Duration:  {anomaly['duration_s']:.1f} seconds")
     print(f"      Max gap:   {anomaly['max_gap_deg']:.1f}° at t = {anomaly['max_gap_time_s']:.1f}s")
+    print(f"      Later sticking episodes (>5° gap, gaps < 0.5 s merged): {len(anomaly['episodes']) - 1}")
+    for ep in anomaly["episodes"][1:]:
+        print(f"        t = {ep['start_s']:7.1f}s  for {ep['end_s'] - ep['start_s']:4.1f}s  max gap {ep['max_gap_deg']:4.1f}°")
 
     # Hypothesis testing
     print("\n[6] Hypothesis Testing:")
-    results = test_hypotheses(rows, anomaly)
+    results = test_hypotheses(rows, anomaly, mode_changes)
     for hyp, evidence, verdict in results:
         icon = "✅" if verdict == "CONFIRMED" else "❌"
         print(f"\n    {icon} {hyp}: {verdict}")

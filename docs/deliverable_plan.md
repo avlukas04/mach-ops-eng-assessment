@@ -1,5 +1,7 @@
 # Assessment Deliverable Plan & Part 2 Build Strategy
 
+> **Revision 2026-10-13:** this is the original planning document. The fleet figures and the detection gate have since been revised against the data; see [`REPORT.md`](../REPORT.md) §6.1 for the final two-tier gate and [`HANDOFF_SUMMARY.md`](HANDOFF_SUMMARY.md) for the corrected findings.
+
 ## 1. Deliverable Structure — Organizing Everything
 
 The README asks for three deliverables. Here's how to organize your project directory:
@@ -84,7 +86,7 @@ Your Part 1 root cause analysis directly hands you the Part 2 requirements:
 
 | Part 1 Finding | Part 2 Action |
 |:---|:---|
-| Left aileron servo drew **332.7 mA** sweep current (+5.86σ) | → Build SPC detector that flags any servo with sweep current > μ + 3σ |
+| Left aileron servo drew **332.7 mA** sweep current (+5.93σ) | → Build SPC detector that flags any servo with sweep current > μ + 3σ |
 | Peak current was **400.3 mA** (+4.06σ) | → Include peak current in multi-parameter screening |
 | Sweep time was **940.9 ms** (+2.92σ) | → Include sweep time as anomaly signal |
 | Position error RMS was **1.128°** (+3.05σ) | → Include position error as anomaly signal |
@@ -140,7 +142,7 @@ For each vehicle:
   Line: LN3   Tech: T182   Inspector: Q30
 ───────────────────────────────────────────────
   LEFT AILERON  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  QUARANTINE
-    Sweep Current:   332.7 mA  [Z = +5.86]  ⚠️
+    Sweep Current:   332.7 mA  [Z = +5.93]  ⚠️
     Peak Current:    400.3 mA  [Z = +4.06]  ⚠️
     Sweep Time:      940.9 ms  [Z = +2.92]  ⚠️
     Backdrive Torque:133.7 Nmm [Z = +2.37]  ⚠️
@@ -305,7 +307,7 @@ Design for three personas (manufacturing floor lead, quality engineer, flight op
 │  │                                                           │  │
 │  │  ┌─── Radar Chart ─────────┐  ┌─── Z-Scores ──────────┐ │  │
 │  │  │      Sweep I            │  │                        │ │  │
-│  │  │     ╱  ●  ╲             │  │  L-AIL Sweep I: +5.86σ │ │  │
+│  │  │     ╱  ●  ╲             │  │  L-AIL Sweep I: +5.93σ │ │  │
 │  │  │   ╱ ╱    ╲  ╲          │  │  L-AIL Peak I:  +4.06σ │ │  │
 │  │  │ Err●───────●Peak       │  │  L-AIL Sweep T: +2.92σ │ │  │
 │  │  │   ╲ ╲    ╱  ╱          │  │  L-AIL BkDrv:  +2.37σ │ │  │

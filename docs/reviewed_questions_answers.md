@@ -1,7 +1,8 @@
 # Operations Engineering Assessment: Reviewed Questions & Answers
 
 **Context:** Mach Operations Engineering Assessment — Root Cause Analysis & Quality Architecture  
-**Reference Document:** [deliverable_plan.md](file:///Users/alukas/.gemini/antigravity-ide/brain/5090c59e-9dc1-4e02-9123-1bc2fb26b55a/deliverable_plan.md)  
+**Reference Document:** [deliverable_plan.md](deliverable_plan.md)  
+**Revision 2026-10-13:** fleet figures re-checked against `manufacturing.csv`; the gate design in Q1/Q2 was revised after testing on the full fleet (final design in [`REPORT.md`](../REPORT.md) §6.1).  
 **Topic:** Critical Technical, Statistical, and Strategic Q&A for Part 1 (Investigation) and Part 2 (Detection & Tooling)
 
 ---
@@ -56,18 +57,23 @@ Using standard deviations to set Upper Control Limits (UCL) and Lower Control Li
 |:---|:---|:---|:---|
 | **Shewhart Control Charts** | $\pm 3\sigma$ ($UCL = \mu + 3\sigma$, $LCL = \mu - 3\sigma$) | Automotive, general manufacturing | Screening & process stability |
 | **Six Sigma ($6\sigma$)** | Process capability targeting $\pm 6\sigma$ within design specs | Motorola, GE, medical devices | High-yield manufacturing (3.4 defects / million) |
-| **Aerospace (AS9100 / NASA)** | Statistical tolerance intervals ($\pm 3\sigma$ min + risk-based gates) | SpaceX, Boeing, Lockheed | Flight-critical actuators & propulsion |
+| **Aerospace quality systems (e.g. AS9100)** | Require statistical techniques and risk-based controls; the specific limits are set per program | Aerospace manufacturers | Flight-critical actuators & propulsion |
 
 For this assessment, **$\pm 3\sigma$ is the standard Shewhart control limit** used in quality engineering for nearly a century. It is the opposite of a band-aid — it is the foundational standard for detecting assignable causes of variation.
 
 #### 4. Applying This to the Mach Fleet Data
-In a fleet of 200,000 vehicles, ~540 vehicles might fall slightly beyond $\pm 3\sigma$ across multiple parameters due to normal statistical tails. However:
+±3σ is the right limit for **one** chart. Each vehicle is checked against **25** (5 servos × 5 measurements), so the chance of at least one false trip adds up: across 200,000 vehicles, **7,348 (3.67%)** have at least one reading beyond ±3σ. That's roughly what chance predicts and far too many to block. (The earlier estimate of ~540 was wrong.) Against that background:
 - **GLDR-0421's Left Aileron Servo Sweep Current:** **332.7 mA**
-- **Fleet Mean ($\mu$):** **190.2 mA**
-- **Fleet Standard Deviation ($\sigma$):** **24.3 mA**
-- **Z-Score:** **$+5.86\sigma$**
+- **Fleet Mean ($\mu$):** **185.12 mA**
+- **Fleet Standard Deviation ($\sigma$):** **24.89 mA**
+- **Z-Score:** **$+5.93\sigma$**, the highest of all 200,000 units
 
-At $+5.86\sigma$, the probability of observing this by random chance is roughly **1 in 200 million**. This is not normal variation — it is a severe physical abnormality.
+At $+5.93\sigma$, the one-sided probability of this by chance is about $1.5 \times 10^{-9}$, or **1 in 650 million**. This is not normal variation; it is a physical abnormality.
+
+**How this shaped the gate design.** Because of the multiple-chart problem, the final design (REPORT.md §6.1) uses two tiers:
+- **QUARANTINE:** a combined score per servo, D = √Σz², ≥ 6.0, or any single z ≥ 5.5. On the current fleet this is exactly 2 units: GLDR-0421 and GLDR-200000.
+- **FLAG:** any reading ≥ 3σ. These units feed trend charts rather than per-unit holds.
+- **How z is computed:** from a robust baseline (median and IQR/1.349) on the high side only, because every bench measurement is clipped at an instrument floor, and that clipping shrinks the plain σ.
 
 #### 5. How SPC Works as a Gate
 SPC serves as an **alarm system**, not the mechanic. It does not need to know the internal mechanical failure mode (e.g., tight gear mesh vs. dried grease vs. bearing misalignment). It detects that out of 200,000 actuators, one drew nearly double the current of its peers. Flagging that anomaly at the factory gate prevents the vehicle from ever reaching the flight line.
@@ -83,7 +89,7 @@ SPC serves as an **alarm system**, not the mechanic. It does not need to know th
 
 **Yes, exactly.** You identified the exact root vulnerability of Mach's factory quality gate:
 
-1. **The Flawed QC Gate:** The existing end-of-line test only evaluated a binary condition:
+1. **The Flawed QC Gate:** From the data, the existing end-of-line test behaves as if it only evaluated a binary condition. Every unit passed, including 32,296 with logged QC exceptions:
    $$\text{Result} = \begin{cases} \text{FAIL} & \text{if hardware throws an internal fault code} \\ \text{PASS} & \text{if sweep completes without a crash/code} \end{cases}$$
 2. **The Escaped Defect:** GLDR-0421's left aileron servo did not throw a firmware error code or trip an overcurrent circuit breaker. It completed the sweep test, but required **332.7 mA** to push through mechanically stiff gears.
 3. **The Missed Opportunity:** The factory test bench measured and recorded `sweep_current = 332.7` into `manufacturing.csv`, but never evaluated the number against an upper bound. It stamped `QC_STATUS = PASS`.
@@ -92,8 +98,11 @@ SPC serves as an **alarm system**, not the mechanic. It does not need to know th
 
 | System State | Pass Count | Flag / Quarantine Count | Effective Pass Rate | Reality |
 |:---|:---|:---|:---|:---|
-| **Current QC Process** | 200,000 / 200,000 | 0 | **100.0%** | **False Sense of Security.** In manufacturing, a 100% pass rate is a major red flag — it means the test thresholds are ineffective. |
-| **SPC Parametric Screening** | 198,740 | 1,260 | **99.37%** | **Realistic Process Control.** Units with extreme current or backdrive torque ($> 3\sigma$) are intercepted and quarantined before flight. |
+| **Current QC Process** | 200,000 / 200,000 | 0 | **100.0%** | **False sense of security.** A 100% pass rate (with 32,296 units passing despite logged exceptions) means the gate is not screening anything. |
+| **Naive ±3σ on 25 measurements** | 192,652 | 7,348 | 96.33% | **Too noisy to block on.** The count matches what chance predicts for 25 tests per vehicle. Review would become a rubber stamp. |
+| **Two-tier SPC gate (adopted)** | 193,500 PASS + 6,498 FLAG | **2 QUARANTINE** | 99.999% ship | **Blocks the units with the friction signature** (GLDR-0421, GLDR-200000). FLAG units ship but drive lot, line, and shift trend charts. |
+
+*(These figures replace an earlier estimate of 1,260 flagged / 99.37%, which was not derived from the data.)*
 
 ---
 
@@ -138,7 +147,7 @@ This requires **fleet-wide parametric health monitoring**, not merely a replay o
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │ Narrow (Too Small): Only hardcode Left Aileron Current > 300 mA        │
-│ ➔ Catches GLDR-0421, but misses bad right aileron, rudder, or elevator  │
+│ ➔ Catches GLDR-0421, but misses bad right aileron, rudder, or elevons   │
 ├────────────────────────────────────────────────────────────────────────┤
 │ Medium (Ideal 80/20): Screen all 5 control surfaces × 5 servo metrics  │
 │ ➔ 25 parametric signals evaluated via SPC rules across all 200K units  │
@@ -149,18 +158,19 @@ This requires **fleet-wide parametric health monitoring**, not merely a replay o
 ```
 
 ### The 25 Actuator Health Signals
-The detector and dashboard evaluate:
-- **5 Control Surfaces:** `left_aileron`, `right_aileron`, `elevator`, `rudder`, `flap`
-- **5 Parametric Metrics per Surface:**
-  1. `sweep_current` (operating draw under movement)
-  2. `peak_current` (maximum transient load)
-  3. `backdrive_torque` (mechanical resistance)
-  4. `transit_time` (response speed)
-  5. `temperature_rise` (thermal dissipation)
+The detector and dashboard evaluate (column names as in `manufacturing.csv`):
+- **5 servos:** `elevon_l`, `elevon_r`, `aileron_l`, `aileron_r`, `rudder`
+- **5 measurements per servo** (chosen from the 9 recorded):
+  1. `sweep_current_ma` (current drawn while moving)
+  2. `peak_current_ma` (maximum transient load)
+  3. `sweep_time_ms` (how fast it moves)
+  4. `position_error_rms_deg` (how accurately it moves)
+  5. `backdrive_torque_nmm` (mechanical resistance)
+- Not screened: `idle_current_ma`, `deadband_deg`, `hysteresis_deg`, `temp_rise_c`. GLDR-0421 was normal on all four, so they are candidates for Phase 2.
 
 ### Fleet Health Context Beyond Servos
 A true production health dashboard allows factory leadership to answer questions such as:
-1. Which manufacturing plant (`OC-PLANT-1` vs. `OC-PLANT-2`), line, or shift exhibits higher outlier rates?
+1. Which manufacturing plant (`HB-PLANT-1` vs. `OC-PLANT-2`), line, or shift exhibits higher outlier rates?
 2. Are specific supplier lots or component batches drifting toward higher resistance?
 3. What is the fleet-wide yield before and after applying statistical gates?
 
@@ -181,7 +191,7 @@ The **Pareto Principle (80/20 Rule)** states that roughly 80% of outcomes result
 
 | Dimension | 80/20 High-Leverage Approach (Recommended) | Over-Engineered Approach (To Avoid) |
 |:---|:---|:---|
-| **Detection Algorithm** | Vectorized Z-score calculation with $\pm 3\sigma$ thresholding (~100 lines of robust Python). Catch 99%+ of critical outliers. | Complex neural net / autoencoder requiring extensive tuning, GPUs, and black-box explanations. |
+| **Detection Algorithm** | Vectorized robust Z-scores with a two-tier threshold (~100 lines of Python). On the current fleet it quarantines both known defect units and nothing else. | Complex neural net / autoencoder requiring extensive tuning, GPUs, and black-box explanations. |
 | **Architecture** | Lightweight web server reading structured precomputed aggregates or local CSV. | Full distributed Kubernetes cluster with Kafka streaming and cloud database provisioning. |
 | **Quality Process** | Automated gate at the end-of-line station that halts shipping on $> 3\sigma$ outliers. | Factory-wide complete re-tooling and changing all supplier contracts simultaneously. |
 
@@ -236,6 +246,6 @@ Instead of building three separate dashboards, build a **single cohesive web int
 
 ## Summary Checklist for Assessment Deliverables
 
-- [x] **Root Cause Investigation (Part 1):** Document telemetry divergence at Waypoint 2 $\rightarrow$ Waypoint 3 caused by left aileron servo lag, and trace back to GLDR-0421's $+5.86\sigma$ sweep current anomaly in manufacturing data.
-- [x] **Detection Logic (Part 2):** Implement Shewhart $\pm 3\sigma$ control limits across all 25 actuator metrics to catch outliers before flight.
-- [x] **Tooling / Dashboard (Part 2):** Provide interactive multi-stakeholder views (Fleet KPIs, SPC Distributions, Vehicle Lookup) to permanently close the factory quality control gap.
+- [x] **Root Cause Investigation (Part 1):** Document the 9.0 s left aileron sticking at Waypoint 2 (t = 246 s) and its 11 recurrences, and trace it back to GLDR-0421's $+5.93\sigma$ sweep current in the manufacturing data.
+- [ ] **Detection Logic (Part 2):** Implement the two-tier gate (robust high-side z; QUARANTINE on D ≥ 6.0 or z ≥ 5.5; FLAG on z ≥ 3) across the 25 actuator measurements in `spc_detector.py`.
+- [ ] **Tooling / Dashboard (Part 2):** Provide interactive multi-stakeholder views (Fleet KPIs, SPC Distributions, Vehicle Lookup) to permanently close the factory quality control gap.

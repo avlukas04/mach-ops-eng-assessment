@@ -13,10 +13,11 @@ Produces:
   6. Figure 5: Z-score radar chart for GLDR-0421
 
 Usage:
-  python analysis/manufacturing_analysis.py
+  python analysis/manufacturing_analysis.py [--vehicle GLDR-0421]
   (run from the assessment root directory)
 """
 
+import argparse
 import csv
 import math
 import os
@@ -37,8 +38,11 @@ if not os.path.exists(MFG_PATH):
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "outputs", "figures")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# The vehicle that crashed
+# The vehicle that crashed (override with --vehicle)
 TARGET_VEHICLE = "GLDR-0421"
+
+# Servo whose lot is checked for a lot-wide shift (the one that failed in flight)
+SUSPECT_SURFACE = "aileron_l"
 
 # The 5 control surface positions on the aircraft
 SURFACES = ["aileron_l", "aileron_r", "elevon_l", "elevon_r", "rudder"]
@@ -73,6 +77,10 @@ def load_and_analyze(path):
     }
     target_row = None
     total_vehicles = 0
+    vehicle_ids = []
+    qc = {"pass": 0, "scrap": 0, "with_exceptions": 0, "exceptions_and_passed": 0,
+          "rework_r05": 0}
+    lot_values = {}  # suspect servo lot -> list of sweep currents
 
     print(f"  Loading {path}...")
     with open(path, "r") as f:
@@ -81,6 +89,19 @@ def load_and_analyze(path):
             total_vehicles += 1
             if row["vehicle_id"] == TARGET_VEHICLE:
                 target_row = row
+            vehicle_ids.append(row["vehicle_id"])
+
+            passed = row["final_qc_pass"] == "1"
+            has_exc = int(row["qc_exception_count"] or 0) > 0
+            qc["pass"] += passed
+            qc["scrap"] += row["scrap_flag"] == "1"
+            qc["with_exceptions"] += has_exc
+            qc["exceptions_and_passed"] += has_exc and passed
+            qc["rework_r05"] += "R05" in row["rework_codes"].split("|")
+
+            lot = row[f"{SUSPECT_SURFACE}_servo_lot_id"]
+            lot_values.setdefault(lot, []).append(
+                float(row[f"{SUSPECT_SURFACE}_servo_sweep_current_ma"]))
 
             for surf in SURFACES:
                 for metric_key, _ in METRICS:
@@ -88,7 +109,7 @@ def load_and_analyze(path):
                     val = float(row[col])
                     fleet_data[surf][metric_key].append(val)
 
-    return fleet_data, target_row, total_vehicles
+    return fleet_data, target_row, total_vehicles, vehicle_ids, qc, lot_values
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +200,26 @@ def fleet_outlier_scan(fleet_data, total_vehicles):
             flagged_counts[key] = count
 
     return flagged_counts, thresholds
+
+
+def similar_signature_scan(fleet_data, vehicle_ids, z_min=Z_THRESHOLD):
+    """
+    List every vehicle whose servo shows the friction signature seen on the
+    crashed unit: sweep current AND peak current both >= z_min sigma high on
+    the SAME servo. The two metrics are uncorrelated across the fleet, so
+    both being high together is far less likely by chance than either alone.
+    """
+    hits = []
+    for surf in SURFACES:
+        sweep = fleet_data[surf]["sweep_current_ma"]
+        peak = fleet_data[surf]["peak_current_ma"]
+        s_stats, p_stats = compute_stats(sweep), compute_stats(peak)
+        for i, (sv, pv) in enumerate(zip(sweep, peak)):
+            zs = z_score(sv, s_stats["mean"], s_stats["std"])
+            zp = z_score(pv, p_stats["mean"], p_stats["std"])
+            if zs >= z_min and zp >= z_min:
+                hits.append((vehicle_ids[i], surf, sv, zs, pv, zp))
+    return sorted(hits, key=lambda h: -(h[3] ** 2 + h[5] ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -311,13 +352,19 @@ def generate_figures(fleet_data, results, output_dir):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    global TARGET_VEHICLE
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    parser.add_argument("--vehicle", default=TARGET_VEHICLE,
+                        help="vehicle_id to trace (default: %(default)s)")
+    TARGET_VEHICLE = parser.parse_args().vehicle
+
     print("=" * 70)
     print("  MANUFACTURING ANALYSIS — TRACING DEFECT TO FACTORY")
     print("=" * 70)
 
     # Load data
     print("\n[1] Loading manufacturing data...")
-    fleet_data, target_row, total_vehicles = load_and_analyze(MFG_PATH)
+    fleet_data, target_row, total_vehicles, vehicle_ids, qc, lot_values = load_and_analyze(MFG_PATH)
     print(f"    {total_vehicles:,} vehicles loaded")
 
     if target_row is None:
@@ -363,7 +410,7 @@ def main():
     for surf in SURFACES:
         surf_label = surf.replace("_", " ").title()
         any_flagged = any(r["flagged"] for r in results[surf])
-        status = "⛔ QUARANTINE" if any_flagged else "✅ PASS"
+        status = "⚠️  OUTSIDE ±3σ" if any_flagged else "within ±3σ"
         print(f"\n    ── {surf_label} ── {status}")
         print(f"    {'Metric':<28} {'Value':>10} {'Mean':>10} {'Std':>8} {'Z-Score':>8} {'Flag':>6}")
         print(f"    {'─' * 28} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 6}")
@@ -386,23 +433,41 @@ def main():
         total_flagged += count
         print(f"    {key:<45} {count:>8} {rate:>7.2f}%")
 
-    # QC Gap analysis
-    print(f"\n[6] Quality Process Gap Analysis:")
-    qc_pass_count = sum(
-        1 for v in fleet_data["aileron_l"]["sweep_current_ma"]
-        if True  # We'd need the raw rows; proxy: total_vehicles
-    )
-    print(f"    Total vehicles in database:  {total_vehicles:,}")
-    print(f"    Vehicles with final_qc_pass = 1:  {total_vehicles:,} (100.0%)")
-    print(f"    Vehicles with final_qc_pass = 0:  0 (0.0%)")
+    # Lot check: is the suspect servo's whole lot shifted, or just this unit?
+    target_lot = target_row[f"{SUSPECT_SURFACE}_servo_lot_id"]
+    lot_means = {lot: sum(v) / len(v) for lot, v in lot_values.items()}
+    print(f"\n[6] Supplier Lot Check ({SUSPECT_SURFACE} sweep current):")
+    print(f"    {target_lot}: mean {lot_means[target_lot]:.2f} mA over "
+          f"{len(lot_values[target_lot]):,} units")
+    print(f"    All {len(lot_means)} lots: mean range "
+          f"{min(lot_means.values()):.2f}–{max(lot_means.values()):.2f} mA")
+    print(f"    → {'Lot is NOT shifted — single-unit defect' if max(lot_means.values()) - min(lot_means.values()) < 5 else 'Lot means differ — investigate supplier'}")
+
+    # Other units with the same signature
+    print(f"\n[7] Other Vehicles With the Same Friction Signature "
+          f"(sweep AND peak current ≥ {Z_THRESHOLD}σ on one servo):")
+    hits = similar_signature_scan(fleet_data, vehicle_ids)
+    print(f"    {'Vehicle':<13} {'Servo':<10} {'Sweep mA':>9} {'Z':>6} {'Peak mA':>9} {'Z':>6}")
+    for vid, surf, sv, zs, pv, zp in hits:
+        mark = "  ← crashed unit" if vid == TARGET_VEHICLE else ""
+        print(f"    {vid:<13} {surf:<10} {sv:>9.1f} {zs:>+6.2f} {pv:>9.1f} {zp:>+6.2f}{mark}")
+    print(f"    {len(hits)} vehicle(s). Rows are ranked by combined current Z; "
+          f"spc_detector.py applies the full production gate.")
+
+    # QC Gap analysis — computed from final_qc_pass / qc_exception_count
+    print(f"\n[8] Quality Process Gap Analysis:")
+    n = total_vehicles
+    print(f"    Vehicles with final_qc_pass = 1:   {qc['pass']:,} of {n:,} ({qc['pass'] / n:.1%})")
+    print(f"    Vehicles with scrap_flag = 1:      {qc['scrap']:,}")
+    print(f"    Vehicles with QC exceptions:       {qc['with_exceptions']:,}")
+    print(f"      ...of which still passed QC:     {qc['exceptions_and_passed']:,}")
+    print(f"    Vehicles with rework code R05:     {qc['rework_r05']:,}")
     print(f"    ")
-    print(f"    ⚠️  The QC system has NEVER rejected a single vehicle.")
-    print(f"    ⚠️  No statistical limits exist on servo bench test parameters.")
-    print(f"    ⚠️  Data is collected (columns exist) but never evaluated")
-    print(f"       against fleet population norms.")
+    print(f"    ⚠️  Bench measurements are recorded but never compared against limits.")
+    print(f"    ⚠️  Logged QC exceptions do not block a pass.")
 
     # Generate figures
-    print(f"\n[7] Generating figures...")
+    print(f"\n[9] Generating figures...")
     generate_figures(fleet_data, results, OUTPUT_DIR)
 
     # Summary
@@ -414,8 +479,11 @@ def main():
     print(f"  Serial:     {target_row['aileron_l_servo_serial']}")
     print(f"  Lot:        {target_row['aileron_l_servo_lot_id']}")
     print(f"  Defect:     Abnormal internal gearbox friction")
-    print(f"  Evidence:   Sweep current +5.86σ, Peak current +4.06σ,")
-    print(f"              Sweep time +2.92σ, Position error +3.05σ")
+    z = {r["metric_key"]: r["z_score"] for r in results[SUSPECT_SURFACE]}
+    print(f"  Evidence:   Sweep current {z['sweep_current_ma']:+.2f}σ, "
+          f"Peak current {z['peak_current_ma']:+.2f}σ,")
+    print(f"              Sweep time {z['sweep_time_ms']:+.2f}σ, "
+          f"Position error {z['position_error_rms_deg']:+.2f}σ")
     print(f"  QC Gap:     No SPC limits on servo bench parameters")
     print("=" * 70)
 
