@@ -376,4 +376,4 @@ A vehicle can carry several reasons, so the reason counts overlap; the tier is s
 
 ---
 
-*Supporting documents: [`docs/root_cause_analysis.md`](docs/root_cause_analysis.md) (full fishbone, fault tree, 5 Whys) · [`docs/reviewed_questions_answers.md`](docs/reviewed_questions_answers.md) (SPC background and tool design notes) · [`docs/HANDOFF_SUMMARY.md`](docs/HANDOFF_SUMMARY.md)*
+*Supporting documents: [`docs/root_cause_analysis.md`](docs/root_cause_analysis.md) (full fishbone, fault tree, 5 Whys) · [`docs/reviewed_questions_answers.md`](docs/reviewed_questions_answers.md) (SPC background and tool design notes) · [`docs/LIVE_SYSTEM_DESIGN.md`](docs/LIVE_SYSTEM_DESIGN.md) (architecture for the live dashboard) · [`docs/PRESENTATION_GUIDE.md`](docs/PRESENTATION_GUIDE.md) · [`docs/HANDOFF_SUMMARY.md`](docs/HANDOFF_SUMMARY.md)*
