@@ -61,9 +61,9 @@
 - **Phase 1 (Release $\rightarrow$ WP-02, 0–246 s):** Released at ~1,510 m AGL. Stable glide; WP-01 hit by 1.21 m, WP-02 by 1.30 m (including a clean −20° bank).
 - **Phase 2 (Primary seizure, 246.1–255.1 s):** Autopilot commanded a bank reversal toward WP-03.
   - **Left aileron command:** ramped to ~+16–18°.
-  - **Left aileron actual:** held at −3° to −10° for **9.0 s** (max gap 27.8°); roll stalled at ~+6° vs +18° setpoint. Right aileron (same bus) tracked within ~1°.
-  - **Breakaway:** at 255.1 s the surface snapped −9.7° → +16.9° in ~100 ms (stiction release).
-- **Phase 3 (Recurrence, 292–940 s):** 11 further sticking episodes (>5° gap, up to 17°, up to 8 s). Every waypoint WP-03..WP-21 missed (109 m → 5,146 m).
+  - **Left aileron actual:** held between roughly 0° and −11° for **9.0 s** (max gap 27.8°); roll stalled at ~+6° vs +18° setpoint. Right aileron (same bus) tracked within ~1°.
+  - **Breakaway:** at 255.1 s the surface snapped −9.6° → +16.6° in ~100 ms (stiction release).
+- **Phase 3 (Recurrence, 292–940 s):** 11 further sticking episodes (>5° gap lasting ≥ 0.5 s, up to 18°, up to 8 s; computed at 500 Hz). Every waypoint WP-03..WP-21 missed (109 m → 5,146 m).
 - **End:** `FAILSAFE` (`NAV_PATH_DEVIATION`) at 1182 s as a *consequence*; impact at 1198.9 s ~5 km off track. Descent rate was normal throughout — no dive or stall.
 
 ### 2. Factory Build Data (`manufacturing.csv`)

@@ -6,7 +6,7 @@
 
 ## 1. Executive Summary
 
-**The failure was caused by manufacturing.** The left aileron servo on GLDR-0421 (ActuMax SM-14, serial SV-65031081, lot L2026-07B) had abnormally high internal friction. At Waypoint 2 (t = 246 s) the autopilot commanded a right bank. The left aileron stayed stuck near −5° to −10° for **9.0 seconds** while it was being commanded to about +16°. It then snapped free in about 100 ms. That is a textbook stiction breakaway. The aircraft missed WP-03 by 109 m. Because it is an unpowered glider, it could not recover the lost energy and position, and every later waypoint was missed by a growing margin, up to 5.1 km. The same servo stuck again **11 more times** later in the flight.
+**The failure was caused by manufacturing.** The left aileron servo on GLDR-0421 (ActuMax SM-14, serial SV-65031081, lot L2026-07B) had abnormally high internal friction. At Waypoint 2 (t = 246 s) the autopilot commanded a right bank. For **9.0 seconds** the left aileron never followed its command: while commanded up to about +17°, it stayed between roughly 0° and −11°, drifting further negative. It then snapped free in about 100 ms. That is a textbook stiction breakaway. The aircraft missed WP-03 by 109 m. Because it is an unpowered glider, it could not recover the lost energy and position, and every later waypoint was missed by a growing margin, up to 5.1 km. The same servo stuck again **11 more times** later in the flight.
 
 The defect was present on the factory bench before the flight. At final test, this servo drew **332.7 mA sweep current, +5.93σ above the 200,000-unit fleet mean** (185.1 mA). It was the **highest of all 200,000 vehicles**. A reading that high from normal variation has odds of about 1 in 650 million. Peak current was also extreme (+4.05σ). The unit still **passed QC**, because the quality gate never compares bench measurements against any limit. **All 200,000 units in the database passed**, including 32,296 that had logged QC exceptions.
 
@@ -51,11 +51,11 @@ This keeps the analysis from anchoring on engineering's early suspicion. I first
 |:--|:--|
 | 0–200 s | Release at about 1,510 m above ground. Stable glide. WP-01 hit within 1.21 m |
 | 200–246 s | A −20° left bank flown cleanly, so the airframe has enough roll control. WP-02 hit within 1.30 m |
-| **≈246.0 s** | Autopilot begins a smooth bank reversal to the right. The left aileron command ramps from negative through 0° toward +16°. **When the command reverses direction, the left aileron stops following.** It hangs at about −4° while the command passes through zero. Sticking that starts at a direction reversal is typical of static friction |
-| 246–255 s | The left aileron stays at −3° to −10° while the gap to its command grows to **27.8°**. The roll controller is saturated for 64% of this window. The right aileron (same power bus) tracks within 1.3°. Roll stalls near +6° against a +18° target |
-| **255.1 s** | Breakaway. The aileron jumps from −9.7° to +16.9° in about 100 ms, the classic signature of static friction suddenly letting go |
+| **245.7 s** | Autopilot begins the bank reversal to the right. The left aileron command ramps from negative through 0° toward +16°. **When the command reverses direction, the left aileron stops following:** the gap grows from 1° at 245.7 s to 4° by 246.0 s and passes 5° at 246.1 s, with the surface hanging at about −4° while the command passes through zero. Sticking that starts at a direction reversal is typical of static friction |
+| 246–255 s | The left aileron stays between roughly 0° and −11°, drifting further negative as its command climbs, while the gap grows to **27.8°**. The roll controller is saturated for 64% of this window. The right aileron (same power bus) tracks within 1.3°. Roll stalls near +6° against a +18° target |
+| **255.1 s** | Breakaway. The aileron jumps from −9.6° to +16.6° in about 100 ms, the classic signature of static friction suddenly letting go |
 | 292 s | WP-03 missed by 109 m |
-| 292–940 s | **11 more sticking episodes** with a >5° command gap (starting at t = 293, 308, 338, 567, 604, 739, 759, 844, 921, 925, 936 s), each up to 17° and lasting up to 8 s |
+| 292–940 s | **11 more sticking episodes** with a >5° command gap lasting at least 0.5 s (starting at t = 293, 308, 338, 567, 603, 739, 759, 844, 921, 925, 936 s), each up to 18° and lasting up to 8 s |
 | 1165–1182 s | Bank pattern ends. At 1182 s the autopilot enters `FAILSAFE` (reason: `NAV_PATH_DEVIATION`), a *result* of the accumulated off-track error |
 | 1198.9 s | Ground impact about 5 km off track |
 
@@ -77,7 +77,7 @@ Only the left aileron diverged when the flight went wrong, and it did so tens of
 
 ![Fig 1 — Left aileron seizure](outputs/figures/fig1_aileron_seizure.png)
 
-**Fig 1. The left aileron seizure at WP-02.** Top: the roll setpoint (blue) rises to +18°, but actual roll (red) stalls near +6° for the whole shaded window. Bottom: the left aileron command (blue) climbs smoothly while the actual position (red) is stuck between −3° and −10°, then snaps to the command at 255.1 s. The right aileron (green) tracks its command throughout, so power, wiring, and software are all working.
+**Fig 1. The left aileron seizure at WP-02.** Top: the roll setpoint (blue) rises to +18°, but actual roll (red) stalls near +6° for the whole shaded window. Bottom: the left aileron command (blue) climbs smoothly while the actual position (red) stays between roughly 0° and −11°, then snaps to the command at 255.1 s. The right aileron (green) tracks its command throughout, so power, wiring, and software are all working.
 
 ![Fig 2 — Waypoint misses](outputs/figures/fig2_waypoint_misses.png)
 
@@ -94,8 +94,8 @@ Only the left aileron diverged when the flight went wrong, and it did so tens of
 | Pilot / operator | Control mode (`control_mode`) | `AUTO_STABILIZE` from release until 1182 s, with no manual input. The failsafe came 936 s after the deviation started. **Ruled out** |
 | Autopilot software | Was the right command issued? | The roll setpoint and left aileron command ramp smoothly and consistently (to about +18° at 255 s), the same way they did for the earlier left bank. The right aileron's command mirrors the left. **Ruled out** |
 | Aerodynamic design / flight plan | Could the airframe fly the maneuver? | The same ±20° bank was flown 46 s earlier, hitting WP-02 within 1.3 m. **Ruled out** |
-| Wind / weather | Wind, acceleration, temperature | Wind 1.1–3.7 m/s between 200 and 300 s, vertical acceleration 8.7–10.3 m/s² (no gust spikes), 7.9–11.9 °C (no icing). Roll error before the event was below 0.02°. **Ruled out** |
-| Sensors (IMU / GPS) | Sensor health | `attitude_valid = 1` throughout, 3D GPS fix with 6–15 satellites, HDOP 0.97 or lower. **Ruled out** |
+| Wind / weather | Wind, acceleration, temperature | Wind 0.9–3.7 m/s between 200 and 300 s, vertical acceleration 8.6–10.3 m/s² (no gust spikes), 7.6–12.0 °C (no icing). Roll error stayed at or below 0.08° from 200 s until the bank reversal began at 245.7 s (where it steps to about 2° within 10 ms), so nothing disturbed the airframe beforehand. **Ruled out** |
+| Sensors (IMU / GPS) | Sensor health | `attitude_valid = 1` throughout, 3D GPS fix with 6–15 satellites, HDOP 1.01 or lower (below 2 is excellent). **Ruled out** |
 | Servo position sensor reporting wrong values | Did the aircraft respond as if the surface moved? | Roll stalled at about 6°, so the surface really did not move. **Ruled out** |
 | Power / wiring | Bus voltage; the right aileron is on the same bus | Servo bus 12.26 V or higher during the event, no brownout, and the right aileron worked normally. **Ruled out** |
 | External linkage or hinge binding | Assembly measurements | Hinge torque 37.07 N·mm (looser than average), freeplay 0.276 mm, screw torque 0.692 N·m, all normal. **Ruled out** |
@@ -149,9 +149,9 @@ Every vehicle's five servos (left and right elevon, left and right aileron, rudd
 |:--|--:|--:|--:|--:|--:|
 | Sweep current (mA) | 332.70 | 185.12 | 24.89 | **+5.93** | **1st of 200,000** |
 | Peak current (mA) | 400.32 | 260.08 | 34.59 | **+4.05** | **1st of 200,000** |
-| Position error RMS (°) | 1.128 | 0.553 | 0.193 | +2.98 | 401st |
-| Sweep time (ms) | 940.89 | 780.04 | 55.04 | +2.92 | 341st |
-| Backdrive torque (N·mm) | 133.68 | 92.14 | 17.69 | +2.35 | 2,073rd |
+| Position error RMS (°) | 1.128 | 0.553 | 0.193 | +2.98 | 396th |
+| Sweep time (ms) | 940.89 | 780.04 | 55.04 | +2.92 | 340th |
+| Backdrive torque (N·mm) | 133.68 | 92.14 | 17.69 | +2.35 | 2,068th |
 
 Taken together, these readings describe a servo that needs much more current to move and that moves more slowly and less precisely. That is the signature of **excess internal friction in the gearbox**. The bench recorded it on 2026-02-06, three weeks before the flight. Only **2 of 200,000** servos drew more than 300 mA of sweep current.
 
@@ -339,7 +339,7 @@ Every number in Sections 3–5 is printed by one of these two scripts:
 | [8] Same-signature scan | GLDR-200000 and the 8 borderline units (§4.4) |
 | [9] QC gap | 100% pass, 32,296 passed with exceptions, R05 count (§5) |
 
-The control surface screen (step [5]) uses every row at 500 Hz. For the other steps, `flight_investigation.py` reads telemetry at 10 Hz (every 50th row) outside the event window and every row at 500 Hz inside 240–265 s. The values above come from that sampling.
+Every check that reports an extreme (the control surface screen, waypoint distances, sticking episodes, and the 200–300 s window used for the rule-out tests) uses every row at 500 Hz. Only the whole-flight plots read telemetry at 10 Hz (every 50th row). Ranks are standard competition ranks (1 + the number of units strictly higher); tied units are noted in the script output. Every number in §3–6 is also recomputed independently by `tests/verify_report.py` (below).
 
 **Running the SPC gate** (about 5 s each):
 
@@ -349,6 +349,8 @@ python3 tools/spc_detector.py score                          # grade all 200,000
 python3 tools/spc_detector.py score --vehicle GLDR-0421      # z / D breakdown for one vehicle
 python3 -m unittest discover -s tests -v                     # 13 rule tests on synthetic data
 ```
+
+**Verifying the report** (about 20 s): `python3 tests/verify_report.py` recomputes 110 claims in this report directly from the raw CSVs, with code written separately from the analysis scripts, and prints OK or DIFF for each. It exits with code 1 if any claim no longer matches the data.
 
 | Tier | Reason code | Rule | Vehicles |
 |:--|:--|:--|--:|
@@ -367,7 +369,7 @@ A vehicle can carry several reasons, so the reason counts overlap; the tier is s
 ## 8. Limitations
 
 - **No teardown.** The friction mechanism (tight gear mesh, contamination, dry lubricant) comes from the electrical and timing signature, not a physical inspection. Tearing down GLDR-200000's servo would confirm it.
-- **Telemetry episode count.** The "11 later episodes" figure uses 10 Hz decimated data, with gaps under 0.5 s merged. At the full 500 Hz there are about 21 separate segments with a >5° gap.
+- **Telemetry episode count depends on the counting rule.** At 500 Hz, with gaps under 0.5 s merged, there are 14 later segments with a >5° gap. Three of them are shorter than 0.5 s: two single samples barely over 5° (737.6 s, 922.7 s) and a 30 ms transient at the bank-pattern exit (1165.0 s) that the right aileron also shows. The report counts episodes lasting at least 0.5 s, which gives 11.
 - **Fleet statistics include the outliers.** μ and σ are computed over all 200,000 units, defect units included. A cleaned baseline would make the Z-scores of real outliers slightly larger.
 - **Independence assumption.** The false-alarm math for D relies on the bench measurements being uncorrelated. That's true in the current data (|r| ≤ 0.01), but the detector should check it whenever the baseline is refrozen.
 - **Only two confirmed defects.** The QUARANTINE limits are justified by false-alarm math, not tuned on many known failures. Teardown results from QUARANTINE and high-D FLAG units should be used to check them.

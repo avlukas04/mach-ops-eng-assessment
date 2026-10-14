@@ -236,8 +236,8 @@ Now we take each Fishbone / Fault Tree branch and test it against the available 
 
 | Sub-Hypothesis | Evidence Test | Finding | Verdict |
 |:---|:---|:---|:---|
-| **Wind gust / turbulence** | Check wind estimates and accelerometer data at $t = 246\text{ s}$ | Between 200 and 300 s: `wind_est_speed_mps` 1.1–3.7 m/s (light breeze). `accel_z_filt_mps2` 8.7–10.3 m/s² (near 1 g, no turbulence spikes). Roll error in the 40 s before the event was at most 0.02°. | ❌ **Eliminated** — Calm conditions, no gust signatures. |
-| **Temperature / icing** | Check temperature at flight altitude | `outside_temp_c` 7.9–11.9 °C between 200 and 300 s (about 1,200 m above ground). Well above freezing. No icing conditions. | ❌ **Eliminated** — Too warm for ice. |
+| **Wind gust / turbulence** | Check wind estimates and accelerometer data at $t = 246\text{ s}$ | Between 200 and 300 s: `wind_est_speed_mps` 0.9–3.7 m/s (light breeze). `accel_z_filt_mps2` 8.6–10.3 m/s² (near 1 g, no turbulence spikes). Roll error stayed at or below 0.08° from 200 s until the bank reversal began at 245.7 s. | ❌ **Eliminated** — Calm conditions, no gust signatures. |
+| **Temperature / icing** | Check temperature at flight altitude | `outside_temp_c` 7.6–12.0 °C between 200 and 300 s (about 1,200 m above ground). Well above freezing. No icing conditions. | ❌ **Eliminated** — Too warm for ice. |
 | **Bad release from carrier** | Check initial flight stability | From $t = 0\text{-}200\text{ s}$, the vehicle flew straight and level with near-zero roll error, hitting WP-01 within 1.21 m. The drop was clean. | ❌ **Eliminated** — Clean release, stable initial flight. |
 
 ---
@@ -247,7 +247,7 @@ Now we take each Fishbone / Fault Tree branch and test it against the available 
 | Sub-Hypothesis | Evidence Test | Finding | Verdict |
 |:---|:---|:---|:---|
 | **IMU / gyroscope drift** | Cross-check attitude estimates vs. GPS track | `attitude_valid = 1` throughout. Roll/pitch/yaw measurements are consistent with GPS ground track and accelerometer data. If the gyro were lying, the GPS track would diverge from the attitude estimate — it doesn't. | ❌ **Eliminated** — Attitude sensors were accurate. |
-| **GPS error / jamming** | Check GPS health during anomaly | `gps_fix_type = 3` (3D fix) throughout, `gps_sats` 6–15, `gps_hdop` ≤ 0.97. No position jumps or outages. | ❌ **Eliminated** — GPS was healthy. |
+| **GPS error / jamming** | Check GPS health during anomaly | `gps_fix_type = 3` (3D fix) throughout, `gps_sats` 6–15, `gps_hdop` ≤ 1.01. No position jumps or outages. | ❌ **Eliminated** — GPS was healthy. |
 | **Servo position feedback lied** (servo actually moved but potentiometer said it didn't) | Cross-check servo feedback against vehicle roll response | If the servo had actually moved but reported incorrectly, the aircraft *would have rolled right* (because the physical surface would be deflected). But before breakaway `roll_deg` peaked at only $+6.8°$ against a $+18.3°$ setpoint. The aircraft's physical behavior confirms the surface was truly stuck. | ❌ **Eliminated** — Physical roll response confirms the surface did not move. |
 
 ---
@@ -266,8 +266,8 @@ Now we take each Fishbone / Fault Tree branch and test it against the available 
 
 | Sub-Hypothesis | Evidence Test | Finding | Verdict |
 |:---|:---|:---|:---|
-| **Left aileron servo internal defect** | Compare commanded vs. actual position | As the command reversed direction and climbed to about +16–18°, `aileron_left_actual_deg` hung between −3° and −10° for **9.0 seconds** ($t = 246.1\text{ s}$ to $255.1\text{ s}$), with the gap reaching 27.8°. The right aileron tracked within 1.3° over the same period. Sticking **recurred 11 more times** later in the flight (292–940 s, gaps up to 17°). | ✅ **Consistent** |
-| **Servo broke free suddenly** (stiction release signature) | Look for sudden snap in position data | At $t ≈ 255.1\text{ s}$: position jumps from $-9.7° \to +16.9°$ in about 100 ms, then tracks the command normally. Classic mechanical breakaway after sustained static friction. | ✅ **Consistent** |
+| **Left aileron servo internal defect** | Compare commanded vs. actual position | As the command reversed direction and climbed to about +16–18°, `aileron_left_actual_deg` stayed between roughly 0° and −11° for **9.0 seconds** ($t = 246.1\text{ s}$ to $255.1\text{ s}$), with the gap reaching 27.8°. The right aileron tracked within 1.3° over the same period. Sticking **recurred 11 more times** later in the flight (292–940 s, episodes of at least 0.5 s, gaps up to 18°). | ✅ **Consistent** |
+| **Servo broke free suddenly** (stiction release signature) | Look for sudden snap in position data | At $t ≈ 255.1\text{ s}$: position jumps from $-9.6° \to +16.6°$ in about 100 ms, then tracks the command normally. Classic mechanical breakaway after sustained static friction. | ✅ **Consistent** |
 | **Manufacturing bench data shows pre-existing defect** | Compare GLDR-0421's servo QC data to the fleet of 200,000 | Sweep current: **332.7 mA** (fleet mean 185.12, **+5.93σ**, highest of 200,000). Peak current: **400.3 mA** (fleet mean 260.08, +4.05σ, also highest). Sweep time: **940.9 ms** (fleet mean 780.04, +2.92σ). Position error RMS: **1.128°** (fleet mean 0.553, +2.98σ). Only **2 vehicles out of 200,000** exceeded 300 mA sweep current: GLDR-0421 and GLDR-200000 (304.2 mA). | ✅ **Confirmed** |
 | **External linkage jam** (pushrod or hinge binding, not the servo itself) | Check hinge torque and linkage freeplay in mfg data | Hinge torque: 37.07 N·mm (fleet mean 54.99, so actually *looser* than average). Linkage freeplay: 0.276 mm (normal). Screw torque: 0.692 N·m (normal). | ❌ Linkage and hinge were fine — the defect is **internal to the servo motor**. |
 
@@ -364,7 +364,7 @@ The structured elimination process conclusively points to **manufacturing / comp
 |:---|:---|:---|
 | Human / Pilot Error | ❌ Eliminated | Autonomous throughout the anomaly; `FAILSAFE` only at 1182 s as a consequence |
 | Software / Design Flaw | ❌ Eliminated | Software issued smooth, correct commands; a ±20° bank succeeded 46 s earlier |
-| Environmental | ❌ Eliminated | Light winds (1.1–3.7 m/s), no icing (7.9–11.9 °C), clean drop |
+| Environmental | ❌ Eliminated | Light winds (0.9–3.7 m/s), no icing (7.6–12.0 °C), clean drop |
 | Sensor / Measurement | ❌ Eliminated | GPS healthy, attitude valid, physical roll response confirms sensor readings |
 | Electrical / Power | ❌ Eliminated | Power rails nominal, right aileron (same bus) worked fine |
 | **Mechanical / Manufacturing** | **✅ Confirmed** | Left aileron servo drew +5.93σ current on the factory bench; stuck under flight loads 12 times; QC had no limits to catch it |

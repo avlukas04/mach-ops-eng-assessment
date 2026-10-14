@@ -205,6 +205,7 @@ def analyze(fleet_data, target_row, total_vehicles):
             vehicle_val = float(target_row[col])
             stats = compute_stats(fleet_data[surf][metric_key])
             z = z_score(vehicle_val, stats["mean"], stats["std"])
+            values = fleet_data[surf][metric_key]
 
             surf_results.append({
                 "metric": metric_label,
@@ -216,6 +217,9 @@ def analyze(fleet_data, target_row, total_vehicles):
                 "max": stats["max"],
                 "z_score": z,
                 "flagged": abs(z) > Z_THRESHOLD,
+                # Standard competition rank: 1 + number of units strictly higher
+                "rank": 1 + sum(1 for v in values if v > vehicle_val),
+                "ties": sum(1 for v in values if v == vehicle_val) - 1,
             })
         results[surf] = surf_results
 
@@ -477,14 +481,15 @@ def main():
         any_flagged = any(r["flagged"] for r in results[surf])
         status = "⚠️  OUTSIDE ±3σ" if any_flagged else "within ±3σ"
         print(f"\n    ── {surf_label} ── {status}")
-        print(f"    {'Metric':<28} {'Value':>10} {'Mean':>10} {'Std':>8} {'Z-Score':>8} {'Flag':>6}")
-        print(f"    {'─' * 28} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 6}")
+        print(f"    {'Metric':<28} {'Value':>10} {'Mean':>10} {'Std':>8} {'Z-Score':>8} {'Rank':>14} {'Flag':>5}")
+        print(f"    {'─' * 28} {'─' * 10} {'─' * 10} {'─' * 8} {'─' * 8} {'─' * 14} {'─' * 5}")
 
         for r in results[surf]:
             flag = "⚠️" if r["flagged"] else ""
+            rank = f"{r['rank']:,}" + (f" (+{r['ties']} tied)" if r["ties"] else "")
             print(f"    {r['metric']:<28} {r['value']:>10.2f} "
                   f"{r['mean']:>10.2f} {r['std']:>8.2f} "
-                  f"{r['z_score']:>+8.2f} {flag:>6}")
+                  f"{r['z_score']:>+8.2f} {rank:>14} {flag:>5}")
 
     # Fleet-wide outlier scan
     print(f"\n[6] Fleet-Wide Outlier Scan (threshold = ±{Z_THRESHOLD}σ):")

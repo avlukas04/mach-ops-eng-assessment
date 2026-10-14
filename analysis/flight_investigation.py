@@ -77,11 +77,12 @@ WAYPOINT_WINDOW_S = 3.0
 def load_telemetry(path, waypoints, sample_rate=50):
     """
     Load telemetry.csv, keeping every `sample_rate`-th row for plotting
-    plus ALL rows in the critical anomaly window (t=240-260s).
-    
-    We sample because the full file is 600,000 rows — too large to plot
-    directly, and most of the flight is nominal. The anomaly window
-    is loaded at full resolution.
+    plus ALL rows from 200 to 300 s (the event and its surroundings).
+
+    Checks that depend on extremes are computed from every row as the file
+    streams past: the control surface screen, the waypoint distances and
+    every left-aileron sample more than 5 deg off its command. Sampling
+    would miss short peaks, so nothing that reports a max or min uses it.
     """
     rows = []
     events = []
@@ -97,6 +98,7 @@ def load_telemetry(path, waypoints, sample_rate=50):
     # exceed the divergence threshold?
     screen = {name: {"max_gap_deg": 0.0, "max_gap_time_s": None, "first_over_s": None,
                      "first_over_state": None, "samples_over": 0} for name in SURFACES}
+    left_over = []  # (t, gap) for every 500 Hz sample with the left aileron > 5 deg off
 
     with open(path, "r") as f:
         reader = csv.DictReader(f)
@@ -127,11 +129,13 @@ def load_telemetry(path, waypoints, sample_rate=50):
                     sc["max_gap_deg"], sc["max_gap_time_s"] = gap, t
                 if gap > DIVERGENCE_THRESHOLD_DEG:
                     sc["samples_over"] += 1
+                    if name == "aileron_left":
+                        left_over.append((t, gap))
                     if sc["first_over_s"] is None:
                         sc["first_over_s"], sc["first_over_state"] = t, raw["vehicle_state"]
 
-            # Keep the row if: sampled OR in the critical anomaly window
-            in_anomaly_window = 240.0 <= t <= 265.0
+            # Keep the row if: sampled OR around the event (full resolution)
+            in_anomaly_window = 200.0 <= t <= 300.0
             if (row_count % sample_rate == 0) or in_anomaly_window:
                 rows.append({
                     "t": t,
@@ -165,7 +169,7 @@ def load_telemetry(path, waypoints, sample_rate=50):
                     "att_valid": int(float(raw["attitude_valid"])),
                 })
 
-    return rows, events, state_changes, mode_changes, row_count, screen
+    return rows, events, state_changes, mode_changes, row_count, screen, left_over
 
 
 def select_suspect(screen):
@@ -181,32 +185,32 @@ def select_suspect(screen):
 # ---------------------------------------------------------------------------
 # Step 3: Analyze the Anomaly — Quantify the Left Aileron Divergence
 # ---------------------------------------------------------------------------
-def analyze_anomaly(rows, gap_tolerance_s=0.5):
+def analyze_anomaly(left_over, gap_tolerance_s=0.5, min_duration_s=0.5):
     """
-    Find every episode where aileron_left_actual diverges from
-    aileron_left_cmd by > 5 deg. Gaps shorter than `gap_tolerance_s` are
-    merged into one episode. The first episode is the primary seizure at
-    WP-02; later episodes show the sticking recurred for the rest of flight.
+    Group the 500 Hz samples where the left aileron is > 5 deg off its
+    command into episodes. Gaps shorter than `gap_tolerance_s` are merged.
+    The first episode is the primary seizure at WP-02. Later episodes count
+    only if they last at least `min_duration_s`; shorter blips (a single
+    sample just over 5 deg, or the 30 ms transient at the bank-pattern exit
+    that both ailerons show) are counted separately, not as sticking.
     """
-    episodes = []
-    for r in rows:
-        gap = abs(r["al_cmd"] - r["al_act"])
-        if gap <= DIVERGENCE_THRESHOLD_DEG:
-            continue
-        if episodes and r["t"] - episodes[-1]["end_s"] <= gap_tolerance_s:
-            ep = episodes[-1]
-            ep["end_s"] = r["t"]
+    segments = []
+    for t, gap in left_over:
+        if segments and t - segments[-1]["end_s"] <= gap_tolerance_s:
+            ep = segments[-1]
+            ep["end_s"] = t
             if gap > ep["max_gap_deg"]:
-                ep["max_gap_deg"], ep["max_gap_time_s"] = gap, r["t"]
+                ep["max_gap_deg"], ep["max_gap_time_s"] = gap, t
         else:
-            episodes.append({"start_s": r["t"], "end_s": r["t"],
-                             "max_gap_deg": gap, "max_gap_time_s": r["t"]})
+            segments.append({"start_s": t, "end_s": t, "max_gap_deg": gap, "max_gap_time_s": t})
 
-    if not episodes:
+    if not segments:
         return {"start_s": None, "end_s": None, "duration_s": 0,
-                "max_gap_deg": 0, "max_gap_time_s": 0, "episodes": []}
+                "max_gap_deg": 0, "max_gap_time_s": 0, "episodes": [], "blips": []}
 
-    first = episodes[0]
+    first, later = segments[0], segments[1:]
+    episodes = [first] + [e for e in later if e["end_s"] - e["start_s"] >= min_duration_s]
+    blips = [e for e in later if e["end_s"] - e["start_s"] < min_duration_s]
     return {
         "start_s": first["start_s"],
         "end_s": first["end_s"],
@@ -214,6 +218,22 @@ def analyze_anomaly(rows, gap_tolerance_s=0.5):
         "max_gap_deg": first["max_gap_deg"],
         "max_gap_time_s": round(first["max_gap_time_s"], 2),
         "episodes": episodes,
+        "blips": blips,
+    }
+
+
+def describe_breakaway(rows, anomaly):
+    """Where the stuck surface sat, and how fast it snapped free (500 Hz rows)."""
+    win = [r for r in rows if anomaly["start_s"] <= r["t"] <= anomaly["end_s"] + 0.5]
+    stuck = [r for r in win if r["t"] <= anomaly["max_gap_time_s"]]
+    after = [r for r in win if r["t"] > anomaly["max_gap_time_s"]]
+    free = next(r for r in after if r["al_act"] >= r["al_cmd"] - 1.0)
+    last_stuck = [r for r in after if r["t"] < free["t"] and r["al_act"] <= -9.0][-1]
+    return {
+        "stuck_min": min(r["al_act"] for r in stuck),
+        "stuck_max": max(r["al_act"] for r in stuck if r["t"] >= anomaly["start_s"] + 1.0),
+        "from_deg": last_stuck["al_act"], "from_t": last_stuck["t"],
+        "to_deg": free["al_act"], "to_t": free["t"],
     }
 
 
@@ -461,7 +481,12 @@ def test_hypotheses(rows, anomaly, mode_changes):
 
     # H4: Environmental — wind, turbulence, icing (200–300 s around the event)
     env = [r for r in rows if 200 <= r["t"] <= 300]
-    pre_anom = [r for r in rows if 200 <= r["t"] < 240]
+    # The bank reversal shows as a step in roll error (0 to ~2 deg within
+    # about 10 ms). Find it as the first sample above 0.5 deg, then look at
+    # everything up to 20 ms before it, which excludes the step's own ramp;
+    # a calm airframe should track its setpoint almost exactly
+    reversal_t = next(r["t"] for r in rows if r["t"] >= 200 and abs(r["roll_err"]) > 0.5)
+    pre_anom = [r for r in rows if 200 <= r["t"] < reversal_t - 0.02]
     if env and pre_anom:
         max_roll_err_pre = max(abs(r["roll_err"]) for r in pre_anom)
         wind_max = max(r["wind"] for r in env)
@@ -473,7 +498,8 @@ def test_hypotheses(rows, anomaly, mode_changes):
             f"Wind {min(r['wind'] for r in env):.1f}–{wind_max:.1f} m/s, "
             f"vertical accel {az_lo:.1f}–{az_hi:.1f} m/s² (no gust spikes), "
             f"outside temp {t_lo:.1f}–{t_hi:.1f} °C (no icing). "
-            f"Max roll error in the 40s before anomaly: {max_roll_err_pre:.2f}°.",
+            f"Max roll error from 200 s until the bank reversal began at {reversal_t:.1f}s: "
+            f"{max_roll_err_pre:.2f}°.",
             "ELIMINATED" if calm else "POSSIBLE"
         ))
 
@@ -521,7 +547,7 @@ def main():
     print(f"    {len(waypoints)} waypoints loaded")
 
     print("\n[2] Loading telemetry (this may take 30-60 seconds)...")
-    rows, events, state_changes, mode_changes, total_rows, screen = load_telemetry(TELEMETRY_PATH, waypoints)
+    rows, events, state_changes, mode_changes, total_rows, screen, left_over = load_telemetry(TELEMETRY_PATH, waypoints)
     print(f"    {total_rows:,} total rows, {len(rows):,} kept for analysis")
 
     # Flight timeline
@@ -572,15 +598,22 @@ def main():
 
     # Anomaly analysis
     print("\n[6] Anomaly Analysis (suspect surface in detail):")
-    anomaly = analyze_anomaly(rows)
-    print(f"    Left aileron divergence detected:")
+    anomaly = analyze_anomaly(left_over)
+    brk = describe_breakaway(rows, anomaly)
+    print(f"    Left aileron divergence detected (500 Hz):")
     print(f"      Start:     t = {anomaly['start_s']:.1f}s")
     print(f"      End:       t = {anomaly['end_s']:.1f}s")
     print(f"      Duration:  {anomaly['duration_s']:.1f} seconds")
     print(f"      Max gap:   {anomaly['max_gap_deg']:.1f}° at t = {anomaly['max_gap_time_s']:.1f}s")
-    print(f"      Later sticking episodes (>5° gap, gaps < 0.5 s merged): {len(anomaly['episodes']) - 1}")
+    print(f"      Stuck at:  {brk['stuck_max']:.1f}° to {brk['stuck_min']:.1f}° while commanded positive")
+    print(f"      Breakaway: {brk['from_deg']:.1f}° at {brk['from_t']:.2f}s → {brk['to_deg']:.1f}° at "
+          f"{brk['to_t']:.2f}s ({(brk['to_t'] - brk['from_t']) * 1000:.0f} ms)")
+    print(f"      Later sticking episodes (>5° gap, gaps < 0.5 s merged, lasting ≥ 0.5 s): "
+          f"{len(anomaly['episodes']) - 1}")
     for ep in anomaly["episodes"][1:]:
         print(f"        t = {ep['start_s']:7.1f}s  for {ep['end_s'] - ep['start_s']:4.1f}s  max gap {ep['max_gap_deg']:4.1f}°")
+    print(f"      Excluded blips under 0.5 s: " + ", ".join(
+        f"{b['start_s']:.1f}s ({b['max_gap_deg']:.1f}°)" for b in anomaly["blips"]))
 
     # Hypothesis testing
     print("\n[7] Hypothesis Testing:")
