@@ -1,0 +1,9 @@
+# Analysis, detection and verification
+pandas==3.0.6
+numpy==2.5.4
+matplotlib==3.11.2
+
+# Live dashboard (API server, ASGI runner, API test client)
+fastapi==0.143.1
+uvicorn==0.54.0
+httpx==0.28.1
