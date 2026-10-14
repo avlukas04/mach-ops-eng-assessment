@@ -191,6 +191,23 @@ Taken together, these readings describe a servo that needs much more current to 
 
 ## 6. Prevention and Detection Approach
 
+### Scope and assumptions
+
+The README asks for an automated method to detect *similar* defects. This report reads that as follows, based on what the data supports:
+
+1. **"Similar defects" means out-of-family actuator performance on any control surface:** a servo in any of the five positions whose bench readings are abnormal against its peers even though it passes the current QC. The servo is the only defect signal in `manufacturing.csv`. Everything else in the record is evenly spread with no structure: vendors, models, firmware, airframe and bracket revisions, threadlocker process and self-test codes each split almost exactly evenly. So the gate targets this failure mode, not every possible defect.
+2. **Recorded warnings that still ship are surfaced, not blocked.** The same process gap shows up outside the servo data: every one of these units passed final QC.
+
+   | Recorded warning | Units |
+   |:--|--:|
+   | QC exceptions logged (E02, E07, …) | 32,296 |
+   | IMU calibration `WARN` | 15,876 |
+   | Magnetometer calibration `WARN` | 12,045 |
+   | Harness strain relief not OK | 5,987 |
+
+   The data doesn't link any of these to a failure (they are spread evenly and unrelated to the crash), so the gate does not block on them. The dashboard shows them as "shipped with open warnings" so quality can see and close them.
+3. **One fleet-wide baseline is valid for this data.** Left aileron bench readings are the same across vendors, models, plants, lines and shifts (sweep current averages 184.9–185.3 mA in every group), and across all 21 servo lots. In production, baselines would be kept per servo model, so that a model with different normal readings doesn't cause false alarms.
+
 ### 6.1 Approach: two-tier SPC on the servo bench data
 
 Statistical process control (SPC) uses Shewhart control charts, a standard method in manufacturing quality for about a century. The idea: in a stable process, measurements of identical parts form a predictable distribution, and a unit far out in the tail signals a specific cause that should be investigated. It is deterministic, easy to explain, and easy to audit, which is what a flight-safety gate needs. It doesn't need to know why a servo is stiff. It only needs to notice that one servo behaves unlike the other 200,000.
@@ -254,7 +271,7 @@ Three measurements have an instrument ceiling, where readings pile up on one val
 
 ### 6.3 Standards basis and what still needs confirming
 
-**Scope.** "Detect similar defects" here means the same failure mode, a servo with excess internal friction, in **any** of the five servo positions and across all of its bench readings, plus fixing the process failure that let it ship (data recorded but never judged). A rule for the left aileron's sweep current alone would catch GLDR-0421 and nothing else. The method extends to any numeric QC column, but each added check brings its own false alarms, so it is extended one reviewed measurement at a time, not to every column at once.
+**Scope** (see *Scope and assumptions* above). A rule for the left aileron's sweep current alone would catch GLDR-0421 and nothing else, which is why the gate covers all five servo positions and all of their bench readings. The method extends to any numeric QC column, but each added check brings its own false alarms, so it is extended one reviewed measurement at a time, not to every column at once.
 
 **The method is established, not invented.** The gate is a form of **Part Average Testing (PAT, AEC-Q001)**, the automotive electronics practice for parts that are within spec but behave unlike their peers, since such outliers fail early in the field at a higher rate. PAT sets limits at the population median plus or minus a multiple of a robust spread, (Q3 − Q1) / 1.35, the same spread this gate uses. PAT typically uses ±6 robust σ on single readings; this gate uses 5.5 on the high side only, plus the combined score D. The rest of the approach follows standard practice:
 

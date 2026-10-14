@@ -2,7 +2,7 @@
 
 **Candidate:** Andrea Lukas  
 **Repository:** [`avlukas04/mach-ops-eng-assessment`](https://github.com/avlukas04/mach-ops-eng-assessment)  
-**Target Next Steps:** Draft `REPORT.md` (Part 1 Written Deliverable) $\rightarrow$ Build `spc_detector.py` & Dashboard (Part 2)
+**Target Next Steps:** ~~Draft `REPORT.md`~~ (done) $\rightarrow$ ~~Build `spc_detector.py`~~ (done, 2026-10-13) $\rightarrow$ Build the dashboard (Part 2, next)
 
 ---
 
@@ -95,8 +95,13 @@ andrea_lukas_ops_eng_assessment/
 ├── flight_plan.csv                          # Intended waypoint targets
 ├── telemetry-simulation.py                  # Local telemetry visualizer
 ├── analysis/
-│   ├── flight_investigation.py              # Telemetry analysis script (outputs Fig 1-3)
-│   └── manufacturing_analysis.py            # Fleet SPC analysis script (outputs Fig 4-5)
+│   ├── flight_investigation.py              # Telemetry analysis: all-surfaces screen, anomaly, rule-outs (Fig 1-3)
+│   └── manufacturing_analysis.py            # Build record, full-record screen, Z-scores, lot/signature scans (Fig 4-5)
+├── tools/
+│   ├── spc_detector.py                      # Production gate: baseline + score → PASS/FLAG/QUARANTINE
+│   └── spc_baseline.json                    # Frozen robust baseline (median, IQR/1.349, ceilings)
+├── tests/
+│   └── test_spc_detector.py                 # 13 rule tests on synthetic data
 ├── docs/
 │   ├── HANDOFF_SUMMARY.md                   # Full context, methodology & findings handoff
 │   ├── deliverable_plan.md                  # Comprehensive assessment plan & Part 2 strategy
@@ -109,6 +114,9 @@ andrea_lukas_ops_eng_assessment/
         ├── fig3_altitude_profile.png        # Flight altitude and glide slope
         ├── fig4_mfg_distributions.png       # Fleet histogram highlighting GLDR-0421 (+5.93σ)
         └── fig5_zscore_radar.png            # 5-surface actuator Z-score radar plot
+    └── spc/
+        ├── spc_summary.json                 # Committed: counts, QUARANTINE list, FLAG retest list
+        └── spc_results.csv                  # Gitignored (38 MB): one row per vehicle; regenerate with score
 ```
 
 ---
@@ -128,11 +136,14 @@ Draft the formal written summary required by README Deliverable #1:
 4. **Quality Process Gap Analysis:** Explain the 100% pass rate anomaly, the R05 rework trap, and absence of parametric limits.
 5. **Proposed Prevention & Detection Approach:** Two-tier SPC gate (robust high-side z; QUARANTINE on D ≥ 6.0 or z ≥ 5.5; FLAG on z ≥ 3) across 25 actuator metrics.
 
-### Phase 2: Implement Automated Detection (`spc_detector.py`)
+### Phase 2: Implement Automated Detection (`spc_detector.py`) — ✅ DONE (2026-10-13)
+> Built as `tools/spc_detector.py` (`baseline` and `score` subcommands, `--vehicle` breakdown, exit code 2 on QUARANTINE, missing data fails closed as `INCOMPLETE`). Fleet: 2 QUARANTINE, 6,498 FLAG, 193,500 PASS. Reason codes: SIGNATURE 2, EXTREME 1, HIGH 6,484, ELEVATED 119, SATURATED 1,028 (a third ceiling, peak current 380 mA, was found while building it). Scores 200k vehicles in about 4 s. Also added since: all-surfaces screen in the flight script (REPORT §3.2), full-record screen in the manufacturing script (§4.2), standards basis (§6.3: PAT / AEC-Q001), and scope and assumptions (§6).
 - Python CLI utility that reads `manufacturing.csv` (or single vehicle records), evaluates all 25 metrics against a frozen robust baseline (median, IQR/1.349), computes the high-side z and the per-servo combined score D, and outputs a JSON/CSV verdict with reason codes: `QUARANTINE` (D ≥ 6.0 → `SIGNATURE`, or z ≥ 5.5 → `EXTREME`), `FLAG` (z ≥ 3 → `HIGH`, D ≥ 4.5, or `SATURATED`), else `PASS`. Must list vehicle IDs; the current `analysis/manufacturing_analysis.py` only scores the hardcoded GLDR-0421 and counts per-metric exceedances (GLDR-200000 was found with a one-off query).
 
-### Phase 3: Build Interactive Production Health Dashboard
-- Lightweight web application (Python backend + Vanilla HTML/Plotly.js frontend).
-- **Tab 1 (Fleet Overview):** Factory KPIs, pass/flag yields, plant/shift trends.
-- **Tab 2 (SPC Control Charts):** Distribution histograms and control charts with $\pm 3\sigma$ thresholds.
-- **Tab 3 (Vehicle Lookup):** Single vehicle lookup (e.g., search `GLDR-0421`) showing status breakdown across all 25 metrics.
+### Phase 3: Build Interactive Production Health Dashboard — NEXT
+- Lightweight web application: Python backend that imports `tools/spc_detector.py` and scores on load, plus a vanilla HTML / Plotly.js frontend. Organised by the three teams the README names:
+- **Production (Fleet Overview):** units built per day by line, shift and plant; PASS/FLAG/QUARANTINE mix; the quarantine queue (blocked before shipment); rework rate by code.
+- **Quality (SPC Charts):** FLAG-rate p-charts by servo lot, line, shift, plant, vendor and model against the 3.25% baseline; trend charts of servo readings over build date; "shipped with open warnings" (32,296 QC exceptions, 15,876 IMU cal WARN, 12,045 mag cal WARN, 5,987 strain relief not OK); readings at instrument ceilings.
+- **Engineering / flight test (Vehicle Lookup):** verdict, reasons, 5×5 z grid, servo serials and lots, go/no-go; retest list ranked by D (GLDR-200000 first, then the 8 borderline units).
+- **At-risk before shipment:** blocked (QUARANTINE) → retest first (FLAG ranked by D) → ships but visible (open warnings).
+- **Live:** backend rescores when the data source changes; page auto-refreshes and shows "last updated". In production the CSV is replaced by the factory database.
