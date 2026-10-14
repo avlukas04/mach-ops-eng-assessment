@@ -81,7 +81,7 @@ Only the left aileron diverged when the flight went wrong, and it did so tens of
 
 ![Fig 2 — Waypoint misses](outputs/figures/fig2_waypoint_misses.png)
 
-**Fig 2. Waypoint miss distances.** Both hits before the event were within 2 m. Every waypoint after it was missed, and the error kept growing. A glider has no engine to recover lost position, so a 9-second loss of control early in the flight compounds for the rest of it.
+**Fig 2. Waypoint miss distances** (closest 3D distance within ±3 s of each target time, 75 m hit tolerance; recomputed from telemetry and matching `flight_plan.csv` to within 0.04 m). Both hits before the event were within 2 m. Every waypoint after it was missed, and the error kept growing. A glider has no engine to recover lost position, so a 9-second loss of control early in the flight compounds for the rest of it.
 
 ![Fig 3 — Altitude profile](outputs/figures/fig3_altitude_profile.png)
 
@@ -328,7 +328,7 @@ Every number in Sections 3–5 is printed by one of these two scripts:
 | Script step | Report evidence |
 |:--|:--|
 | `flight_investigation.py` [3] Timeline | State changes, `FAILSAFE` at 1182 s, impact at 1198.9 s |
-| [4] Waypoint results | WP-01/02 hits, WP-03 to WP-21 misses (Fig 2) |
+| [4] Waypoint results | WP-01/02 hits, WP-03 to WP-21 misses (Fig 2). Miss distances are recomputed from telemetry (closest 3D distance within ±3 s of the target time) and match `flight_plan.csv` to within 0.04 m |
 | [5] Control surface screen | All five surfaces compared at 500 Hz; only the left aileron diverges during the deviation (§3.2) |
 | [6] Anomaly analysis | Primary seizure 246.1–255.1 s, 27.8° gap, the 11 later episodes with times |
 | [7] Hypothesis testing | Every row of the ruled-out table in §3.4 |

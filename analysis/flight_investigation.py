@@ -68,9 +68,13 @@ def load_flight_plan(path):
 # ---------------------------------------------------------------------------
 SURFACES = ["aileron_left", "aileron_right", "elevon_left", "elevon_right", "rudder"]
 DIVERGENCE_THRESHOLD_DEG = 5.0
+# flight_plan.csv's closest_approach_actual_m is the closest 3D distance to
+# the target within this many seconds of the target time; recomputed from
+# telemetry below as an independent check
+WAYPOINT_WINDOW_S = 3.0
 
 
-def load_telemetry(path, sample_rate=50):
+def load_telemetry(path, waypoints, sample_rate=50):
     """
     Load telemetry.csv, keeping every `sample_rate`-th row for plotting
     plus ALL rows in the critical anomaly window (t=240-260s).
@@ -86,6 +90,8 @@ def load_telemetry(path, sample_rate=50):
     prev_state = None
     prev_mode = None
     row_count = 0
+    for w in waypoints:
+        w["computed_m"] = math.inf
     # Unbiased screen of every control surface at full 500 Hz: how far does
     # the actual position ever get from the command, and when does it first
     # exceed the divergence threshold?
@@ -107,6 +113,12 @@ def load_telemetry(path, sample_rate=50):
             if raw["control_mode"] != prev_mode:
                 mode_changes.append((t, raw["control_mode"], raw.get("failsafe_reason", "")))
                 prev_mode = raw["control_mode"]
+
+            for w in waypoints:
+                if abs(t - w["target_time_s"]) <= WAYPOINT_WINDOW_S:
+                    d = math.dist((float(raw["pos_n_m"]), float(raw["pos_e_m"]), float(raw["alt_agl_m"])),
+                                  (w["target_n"], w["target_e"], w["target_alt"]))
+                    w["computed_m"] = min(w["computed_m"], d)
 
             for name in SURFACES:
                 gap = abs(float(raw[f"{name}_cmd_deg"]) - float(raw[f"{name}_actual_deg"]))
@@ -509,7 +521,7 @@ def main():
     print(f"    {len(waypoints)} waypoints loaded")
 
     print("\n[2] Loading telemetry (this may take 30-60 seconds)...")
-    rows, events, state_changes, mode_changes, total_rows, screen = load_telemetry(TELEMETRY_PATH)
+    rows, events, state_changes, mode_changes, total_rows, screen = load_telemetry(TELEMETRY_PATH, waypoints)
     print(f"    {total_rows:,} total rows, {len(rows):,} kept for analysis")
 
     # Flight timeline
@@ -524,13 +536,18 @@ def main():
         print(f"    {t:8.1f}s  EVENT: {ev}")
 
     # Waypoint summary
-    print("\n[4] Waypoint Results:")
-    print(f"    {'WP':<6} {'Time':>7} {'Miss (m)':>10} {'Status':>8}")
-    print(f"    {'─' * 6} {'─' * 7} {'─' * 10} {'─' * 8}")
+    print(f"\n[4] Waypoint Results (miss = closest 3D distance within ±{WAYPOINT_WINDOW_S:.0f} s of target time):")
+    print(f"    {'WP':<6} {'Time':>7} {'Provided':>10} {'Computed':>10} {'Status':>8}")
+    print(f"    {'─' * 6} {'─' * 7} {'─' * 10} {'─' * 10} {'─' * 8}")
     for w in waypoints:
-        status = "✅ HIT" if w["hit"] else "❌ MISS"
+        status = "✅ HIT" if w["computed_m"] <= w["tolerance"] else "❌ MISS"
         print(f"    {w['id']:<6} {w['target_time_s']:>7.0f}s "
-              f"{w['closest_m']:>10.1f} {status:>8}")
+              f"{w['closest_m']:>10.1f} {w['computed_m']:>10.1f} {status:>8}")
+    worst = max(abs(w["computed_m"] - w["closest_m"]) for w in waypoints)
+    agree = all((w["computed_m"] <= w["tolerance"]) == bool(w["hit"]) for w in waypoints)
+    print(f"    Recomputed from telemetry: max difference from flight_plan.csv {worst:.2f} m; "
+          f"hit/miss {'agrees' if agree else 'DISAGREES'} for all {len(waypoints)} waypoints "
+          f"(tolerance {waypoints[0]['tolerance']:.0f} m).")
 
     # Screen every control surface before focusing on any one of them
     print(f"\n[5] Control Surface Screen (all {total_rows:,} rows, |cmd − actual| > {DIVERGENCE_THRESHOLD_DEG:.0f}°):")
