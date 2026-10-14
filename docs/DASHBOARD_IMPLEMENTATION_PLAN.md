@@ -1,0 +1,260 @@
+# Dashboard Implementation Plan
+
+How the live production health dashboard will be built, step by step: what each piece does, how it works, why it is built that way, and which problem from the investigation it addresses. Requirements and architecture are in [`LIVE_SYSTEM_DESIGN.md`](LIVE_SYSTEM_DESIGN.md); this document is the build plan.
+
+Status: **plan for review**. Nothing below is built yet.
+
+---
+
+## 1. From problems found to what the dashboard does
+
+Everything the dashboard does traces back to a problem the investigation found. Each capability does one of three things:
+
+- **Detect:** notice a problem as soon as the data shows it.
+- **Prevent:** stop a problem from reaching flight (hold, retest, re-screen, sign-off).
+- **Clarify:** make the state of production obvious to the people who act on it.
+
+| # | Problem found (evidence) | Capability | Type | Team | Built in |
+|:--|:--|:--|:--|:--|:--|
+| I1 | A +5.93σ servo passed QC; bench readings are recorded but never judged (REPORT §4–5) | Every unit scored on arrival; QUARANTINE queue | Detect, prevent | Production, engineering | Steps 3, 5, 6 |
+| I2 | GLDR-200000's fault is spread across several readings; no single limit catches it (§6.1) | Combined score D per servo, shown in the z grid | Detect | Engineering | Steps 3, 6 |
+| I3 | Defects are single units; all 21 lots are identical (§4.4) | Per-unit scoring for containment; lot p-chart shows no lot shift, so no needless recall | Detect, clarify | Quality, production | Steps 4, 6 |
+| I4 | 100% QC pass rate for a month went unnoticed (§5) | Header tile: "QC passed 100%" next to "Gate held N, flagged M" | Clarify | All (quality first) | Steps 4, 6 |
+| I5 | 32,296 units with logged exceptions passed; 59,229 have some open warning (§6) | Open-warnings panel by type, line and station | Clarify, prevent | Quality | Steps 4, 6 |
+| I6 | GLDR-0421's R05 rework didn't re-check the servo (§5) | Any changed record is re-scored; history kept; rework panel by code and line | Prevent, clarify | Quality, production | Steps 1, 3, 6 |
+| I7 | Readings pinned at instrument ceilings; GLDR-0421 read above one (§6.1) | `SATURATED` tag; ceiling-share panel | Detect | Quality (fixture owners) | Steps 3, 4, 6 |
+| I8 | GLDR-200000 and 8 borderline units share the signature (§4.4) | Retest list ranked by D | Prevent | Engineering / flight test | Steps 5, 6 |
+| I9 | Teams planned to repeat the test with other units without knowing which were risky (README) | Vehicle lookup with go / no-go and reasons | Prevent, clarify | Engineering / flight test | Steps 5, 6 |
+| I10 | 10 Hz sampling hid extremes; a provided column had an undocumented definition (verifier) | Every record scored; inputs validated; rejects logged and shown | Detect | All (system health) | Steps 2, 3, 6 |
+| I11 | Limits would drift if recomputed from live data (§6.2) | Frozen, versioned baseline; version shown on every score and in the health strip | Prevent | Quality | Steps 1, 3, 6 |
+| I12 | D's false-alarm math assumes uncorrelated readings (\|r\| ≈ 0.006 today) | Rolling correlation check with alert | Detect | Quality | Step 4 |
+| I13 | A drifting supplier, line or shift would show at group level before any unit crosses a limit (§6.1) | FLAG-rate p-charts with control limits and run rules | Detect, prevent | Quality | Steps 4, 6 |
+| I14 | A gate that silently stops working looks the same as a healthy one (the 100% pass rate) | Freshness, ingest errors and assumption checks; strip turns red | Detect | All | Steps 4, 6 |
+| I15 | Nothing recorded who released a unit or why (§6.2: engineer sign-off) | Retest / release workflow with name and note, logged as events | Prevent, clarify | Engineering, quality | Steps 1, 5, 6 |
+
+**Prevention happens at four points:**
+1. **At the bench / on arrival:** QUARANTINE before final QC (I1, I2).
+2. **Before flight:** retest list and go / no-go lookup (I8, I9).
+3. **After rework:** automatic re-score (I6).
+4. **Upstream:** p-charts catch drift before it produces quarantined units (I13).
+
+---
+
+## 2. What each team gets
+
+| Team | Detect | Prevent | Clarify |
+|:--|:--|:--|:--|
+| **Production** (floor leads, line managers) | New QUARANTINE units as they arrive, with age | Pull blocked units before final QC; see re-screens after rework | Units per hour by line vs normal; verdict mix by line and shift; rework rate by code |
+| **Quality** | Out-of-control FLAG rates by lot / line / shift / plant / vendor / model; drift in bench readings; ceiling share; broken assumptions | Contact a supplier or stop a line on a p-chart signal before units fail; extend fixture range | QC-reported vs gate verdicts; open warnings by type; baseline version |
+| **Engineering / flight test** | Why a unit was flagged: which servo, which reading (z grid, reasons) | Go / no-go before flight; retest the highest-D units first; record retest and release | Full traceability: servo serials and lots, build line and shift, score history, events |
+| **Everyone** | System problems: feed stopped, inputs rejected | — | One header showing the state of production, plus the system health strip |
+
+---
+
+## 3. Build steps
+
+Each step has **what** is built, **how** it works, **why** it's built that way, the **problems** it addresses, and the **check** that proves it works. Each step is committed separately.
+
+### Step 0: Setup
+
+- **What:** `requirements.txt` (pandas, numpy, matplotlib, fastapi, uvicorn, httpx) and installation of the three new packages. `outputs/live/` is gitignored.
+- **How:** `pip install -r requirements.txt`.
+- **Why:** anyone can reproduce the environment with one command. The live database is generated data, so it is rebuilt by replay, not committed.
+- **Check:** imports succeed; existing unit tests and `tests/verify_report.py` (110 claims) still pass.
+
+### Step 1: Store, `pipeline/store.py`
+
+- **What:** the SQLite database and every read and write to it.
+- **How:**
+  - Opened in **WAL mode**, so the dashboard can read while the worker writes.
+  - Tables:
+    - `units`: one row per vehicle, the facts as received, plus a fingerprint (hash) of the row.
+    - `scores`: the current verdict, reasons, per-servo D, worst servo and metric, saturated flag, **baseline version** and `scored_at`.
+    - `score_history`: every score ever given, so changes are visible.
+    - `events`: `QUARANTINE_RAISED`, `RETEST_PASS`, `RETEST_FAIL_REPLACED`, `RELEASED`, each with who, when and a note.
+    - `runs`: one row per ingest cycle (rows read, new, changed, rejected, duration).
+    - `ingest_errors`: the rejected row and the reason.
+  - Each batch is written in **one transaction**.
+  - A unit that arrives again unchanged (same fingerprint) is ignored. A unit that arrives with **different values** (for example, after rework) is updated and re-scored, and the old score moves to history.
+- **Why:**
+  - One transaction per batch means a crash never leaves a half-written batch.
+  - Fingerprints make re-reading the source harmless and turn real changes into a re-screen, closing the R05 gap (I6).
+  - The baseline version on every score makes any verdict reproducible (I11).
+  - Events give sign-off traceability (I15).
+- **Check (tests):**
+  - re-inserting the same unit changes nothing;
+  - a changed unit is re-scored and its old score is in history;
+  - a batch that fails midway leaves no partial rows;
+  - events are recorded with who and when.
+
+### Step 2: Source, `pipeline/source.py`
+
+- **What:** where units come from, behind one interface: `fetch_new(cursor) → (rows, new_cursor, sim_time)`.
+- **How:**
+  - **ReplaySource:**
+    - Loads `manufacturing.csv`, sorts it by `build_date_utc`, and groups it into the 672 build hours (about 298 units each).
+    - Each call returns the next hour and advances a **simulated clock** to that hour.
+    - `--speed` sets seconds of real time per build hour: 2 s plays the month in about 22 minutes; `max` plays it instantly.
+  - **CsvWatchSource:** checks the file's modification time and returns rows with unseen IDs, standing in for a live export.
+  - A factory adapter (MES or database query by timestamp) would be a third class with the same interface.
+- **Why:**
+  - Scoring and display never depend on where data comes from, so moving to a real feed changes one file.
+  - The simulated clock makes "before final QC" and "time in queue" measurable in the demo, which is the core of "flag before shipment".
+- **Problems addressed:** I10 (the system processes every record, in order).
+- **Check:** a full replay returns exactly 200,000 unique units across 672 hours, in build order, with the simulated clock ending at 2026-02-28 23:00.
+
+### Step 3: Runner, `pipeline/runner.py`
+
+- **What:** the loop that keeps judging the data: fetch → validate → score → store → health → notify.
+- **How:**
+  1. **Fetch** the next batch from the source.
+  2. **Validate** each row:
+     - required columns present;
+     - the 25 bench readings parse as numbers;
+     - `vehicle_id` not empty.
+
+     Rows that fail go to `ingest_errors` with the reason. A row with a missing bench reading is **not** rejected: it is scored, and the gate quarantines it as `INCOMPLETE` (fail closed).
+  3. **Score** with `spc_detector.classify(batch, baseline)`, the same tested code and the same frozen baseline as the command-line tool.
+  4. **Store** units, scores and a `QUARANTINE_RAISED` event for each new hold, in one transaction.
+  5. **Update health** (Step 4).
+  6. **Notify** the API so it can push an update to open browsers.
+
+  Command line: `python3 -m pipeline.runner --replay --speed max` (for testing, with no web server).
+- **Why:**
+  - Scoring each unit the moment it arrives is what puts a verdict in front of people before final QC, 1–9 hours after build (I1).
+  - Reusing `spc_detector` means the live gate is exactly the gate that was tested and verified, including the combined score (I2) and ceiling tags (I7).
+  - Because the baseline is frozen, scoring in hourly batches must give **identical** verdicts to scoring all 200,000 at once. The golden test proves it rather than assuming it.
+- **Problems addressed:** I1, I2, I6, I7, I10, I11.
+- **Golden tests:**
+  - after a full replay the database holds exactly **2 QUARANTINE / 6,498 FLAG / 193,500 PASS**, matching `spc_detector score` vehicle for vehicle;
+  - GLDR-0421 is raised at simulated **02-06 03:00**, an hour before its 04:00 QC timestamp;
+  - GLDR-200000 is raised at **02-18 07:00**, before its 08:00 QC timestamp;
+  - a row with a blanked reading is quarantined as `INCOMPLETE`.
+
+### Step 4: Health, `pipeline/health.py`
+
+- **What:** the calculations behind the five health layers, computed from the database after each batch.
+- **How:**
+  - **FLAG-rate p-charts.** For each group (servo lot, line, shift, plant, vendor, model, and day), p = flagged / units. The centre line p̄ is the fleet FLAG rate (3.25%). Limits are p̄ ± 3·√(p̄(1 − p̄)/n) for that group's size n, so small groups get wider limits. A point outside the limits, or 8 consecutive points on one side of the centre line (a standard Western Electric run rule), is marked out of control. Lot charts use servo-level flags, so a bad supplier lot shows even when the rest of the vehicle is fine.
+  - **QC vs gate.** `final_qc_pass` share (reported) beside the gate's counts (held, flagged, clean). This shows the 100% pass rate against what the data actually says.
+  - **Open warnings:** units with QC exceptions, IMU or magnetometer calibration WARN, or failed strain relief, by type, line and QC station.
+  - **Throughput and rework:** units per build hour and day by plant, line and shift; rework share and count by code (R05, R12, R19, R21, R33) and line.
+  - **Instrument ceilings:** share of readings at each fixture ceiling, per metric.
+  - **Freshness:** time since the last batch, compared with the expected cadence. Stale means no batch for more than 3× the cadence.
+  - **Assumption check:** correlation between each servo's five metrics over the most recent 20,000 units. Alert if any |r| exceeds 0.1, because the D score's false-alarm rate would no longer hold.
+- **Why:**
+  - Per-unit flags catch defective units. Group charts catch a process going wrong before units fail, which is upstream prevention (I13).
+  - The QC-vs-gate comparison and the self-checks exist because the original failure was a quality system that looked healthy and wasn't (I4, I12, I14).
+  - Open warnings and rework give quality its closure list (I5, I6).
+  - The ceiling share tells fixture owners when their instrument range is hiding information (I7).
+- **Problems addressed:** I3, I4, I5, I6, I7, I12, I13, I14.
+- **Check against known values:**
+  - FLAG rate 3.25%, with every plant, line, shift and day inside its limits (daily range 2.9–3.7% against limits of about 2.6–3.9%);
+  - maximum |r| about 0.006;
+  - 1,028 saturated vehicles;
+  - 59,229 units with open warnings;
+  - 20% reworked;
+  - plus a synthetic test that injects a drifting lot and confirms its p-chart goes out of control.
+
+### Step 5: API and live push, `dashboard/app.py`
+
+- **What:** a FastAPI service that starts the runner and serves each view's data.
+- **How:**
+  - **Startup hook (lifespan):** opens the store and starts the runner as a background task, so scoring runs from server start whether or not anyone is watching.
+  - **Endpoints** (all read-only except one):
+
+    | Endpoint | Serves | Team |
+    |:--|:--|:--|
+    | `GET /api/summary` | counts by verdict, QC-reported pass share, units / hour, simulated time, freshness | All (header) |
+    | `GET /api/quarantine` | blocked units: reasons, worst servo, D, age, line, shift | Production |
+    | `GET /api/throughput?by=` | units and rework per hour / day by line, shift or plant | Production |
+    | `GET /api/charts/pchart?by=` | FLAG rate, n, limits and out-of-control marks per group | Quality |
+    | `GET /api/charts/trend?servo=&metric=` | daily median and quartiles of a bench reading | Quality |
+    | `GET /api/warnings` | open warnings by type, line and station | Quality |
+    | `GET /api/ceilings` | share of readings at each instrument ceiling | Quality |
+    | `GET /api/retest` | FLAG units ranked by D | Engineering |
+    | `GET /api/units/{id}` | full record, verdict, reasons, 5×5 z grid, D, history, events | Engineering |
+    | `POST /api/units/{id}/events` | record a retest result or a release (name and note required) | Engineering |
+    | `GET /api/health` | freshness, ingest errors, assumption check, baseline version | All |
+    | `GET /api/stream` | server-sent event on every new batch | All |
+
+  - **Release rules:** a quarantined unit stays blocked until a `RELEASED` event with a name and note is recorded. `RETEST_FAIL_REPLACED` keeps it blocked until the replacement servo is scored.
+- **Why:**
+  - Each view gets exactly what it needs, so the browser does no analysis.
+  - The same API can be called by other systems: a bench station could ask "is this unit cleared?" before installing a servo.
+  - Server-sent events push an update the moment a batch lands, so a new hold appears on every screen without a refresh.
+  - The release rules make the engineer sign-off from REPORT §6.2 enforceable and traceable (I15).
+- **Problems addressed:** I1, I8, I9, I15, plus the README's "operate continuously".
+- **Check (API tests on a replayed database):**
+  - both known defects are in `/api/quarantine`;
+  - `/api/units/GLDR-0421` returns D = 8.57 and the left aileron row of the z grid;
+  - a release without a note is refused;
+  - a valid release is logged and the unit leaves the queue;
+  - unknown IDs return 404;
+  - `/api/stream` emits an event after a batch.
+
+### Step 6: Frontend, `dashboard/static/`
+
+- **What:** a single page with a header and four tabs: Production, Quality, Engineering, System health. Charts use Plotly.js; the page is plain HTML, CSS and JavaScript with no build step.
+- **How:**
+  - **Header (everyone):** simulated time and a live indicator; tiles for units built, held, flagged and clean; **"QC reported 100% pass"** shown beside the gate's verdicts; baseline version.
+  - **Production:**
+    - QUARANTINE queue (newest first: vehicle, line, shift, worst servo, D, reasons, time in queue);
+    - units per hour by line, with the normal range shaded;
+    - verdict mix by line and shift;
+    - rework rate by code and line.
+  - **Quality:**
+    - p-chart with a group selector (lot, line, shift, plant, vendor, model, day); out-of-control points highlighted with the rule that fired;
+    - bench-reading trend for a chosen servo and metric (daily median and spread);
+    - open warnings by type and station;
+    - ceiling share per metric.
+  - **Engineering:**
+    - vehicle search showing verdict, reasons, and the **5×5 z grid** (servos × readings) with FLAG-level and QUARANTINE-level cells marked and D per servo;
+    - servo serials and lots, build line and shift, score history and events;
+    - retest / release form;
+    - retest list ranked by D, with GLDR-200000 and the borderline units at the top.
+  - **System health:** freshness, ingest errors (latest rejected rows and reasons), assumption check, baseline version and hash. The tab label and header indicator turn red when anything is unhealthy.
+  - **Live updates:** the page listens to `/api/stream` and refreshes the open tab when a batch lands, falling back to polling every 10 s if the stream drops.
+  - The **dataviz skill** is loaded before any chart code: one colour system across tabs, readable in light and dark, with status colours reserved for verdicts.
+- **Why:**
+  - Each tab leads with its team's question (§2), so nobody hunts for their answer.
+  - The QC-vs-gate tile puts the original failure on screen permanently (I4).
+  - The z grid answers "why was this flagged?" in one look (I2, I9).
+  - The red health indicator means a broken feed can't look like a quiet day (I14).
+- **Check:**
+  - run the replay and walk each tab;
+  - GLDR-0421 appears in Production at simulated 02-06 03:00;
+  - opening it in Engineering shows the left aileron row in red with D = 8.57;
+  - releasing it with a note logs the event;
+  - stopping the replay turns the health strip red.
+
+### Step 7: One command and documentation
+
+- **What:** `python3 -m dashboard --replay --speed 2 [--reset]` starts the replay, the API and the page and opens `http://127.0.0.1:8000`. Updates to REPORT §7 (tools table, run instructions, how the dashboard addresses each README bullet), the handoff doc, and the presentation guide's demo order.
+- **Why:** a reviewer should be able to see it running with one command, and the report should explain it.
+- **Check:** from a fresh clone, install and run; units start arriving within seconds.
+
+### Step 8: Final verification
+
+- **What:** all unit and golden tests, `tests/verify_report.py`, both analysis scripts, a full replay end to end, and a code review pass.
+- **Check:** everything is green, and the dashboard's counts match the report exactly.
+
+---
+
+## 4. How the dashboard answers each README bullet
+
+| README | Answered by |
+|:--|:--|
+| Surfaces production health across the fleet | Header plus the five health layers: verdicts (product risk), p-charts and trends (stability), QC vs gate and open warnings (quality-system integrity), throughput and rework, ceilings and data health |
+| Flags at-risk units before shipment | Scoring on arrival; QUARANTINE queue before the final-QC timestamp (proved by the golden test); retest list by D; open warnings; release only with sign-off |
+| Clear visibility to production, quality and engineering | One tab per team built around its decision (§2), plus a shared header and health strip |
+| Operates continuously with a live connection to data | Background runner from server start; source adapter (replay now, factory feed later); server push; self-monitoring that turns red when the feed or assumptions break |
+
+---
+
+## 5. Out of scope, stated
+
+- **User accounts and permissions:** the release form records a name but doesn't authenticate it. Production would add login and role-based release rights (for example, quality engineers only).
+- **Blocking on open warnings:** shown, not blocked, because the data doesn't link them to failures (REPORT §6).
+- **Alert delivery** (email, Slack, pager): the health endpoint is designed for an alerting tool to poll; wiring one up is a deployment step.
+- **Postgres and multi-plant deployment:** the schema is written to move; the demo uses SQLite.

@@ -9,7 +9,7 @@ This document defines what the README's dashboard requirement means for this dat
 >
 > Design your solution as if it will operate continuously in a real production environment with a live connection to data.
 
-Status: **design for review.** Only `tools/spc_detector.py` (the scoring gate) exists so far.
+Status: **design for review.** Only `tools/spc_detector.py` (the scoring gate) exists so far. The step-by-step build plan, with how and why for each piece, is in [`DASHBOARD_IMPLEMENTATION_PLAN.md`](DASHBOARD_IMPLEMENTATION_PLAN.md).
 
 ---
 
