@@ -315,7 +315,7 @@ As discussed with the Head of Ops, these come after the basic process is fixed. 
 | `tools/spc_detector.py` | The production gate (§6.1). `baseline` freezes the median, robust σ and instrument ceilings for all 25 measurements to `tools/spc_baseline.json`. `score` grades every vehicle PASS / FLAG / QUARANTINE with reason codes, writes `outputs/spc/spc_results.csv` (one row per vehicle, with per-servo D, flag and lot for the p-charts) and `spc_summary.json` (counts, QUARANTINE list, FLAG retest list ranked by D), and exits with code 2 if anything is quarantined. `--vehicle` prints a full z / D breakdown. Tested in `tests/test_spc_detector.py` | Done |
 | Production health dashboard | Three tabs: Fleet Overview (floor leads), SPC Charts (quality), Vehicle Lookup (flight test go/no-go) | Planned |
 
-**Running the Part 1 investigation** (from the repository root, with `telemetry.csv`, `flight_plan.csv`, and `manufacturing.csv` present; Python 3.10 or later; commands below assume the virtual environment is active):
+**Running the Part 1 investigation** (from the repository root, with `telemetry.csv`, `flight_plan.csv`, and `manufacturing.csv` present; Python 3.11 or later (pandas 3 requires it); commands below assume the virtual environment is active):
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate   # isolated environment (needed on Homebrew Python)
