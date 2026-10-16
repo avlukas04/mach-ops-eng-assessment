@@ -72,7 +72,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
     - `scores`: the current verdict, reasons, per-servo D, worst servo and metric, saturated flag, **baseline version** and `scored_at`.
     - `score_history`: every score ever given, so changes are visible.
     - `events`: `QUARANTINE_RAISED`, `RETEST_PASS`, `RETEST_FAIL_REPLACED`, `RELEASED`, each with who, when and a note.
-    - `runs`: one row per ingest cycle (rows read, new, changed, rejected, duration).
+    - `runs`: one row per ingest cycle (rows read, new, changed, rejected, `duration_ms`). The duration is measured on a monotonic clock from fetch to write, not by subtracting wall-clock timestamps, so an NTP or manual clock change can't corrupt it; `started_at` / `finished_at` are wall-clock times (millisecond resolution) that record *when*. Databases created before the column existed gain it on open, with NULL for old rows.
     - `ingest_errors`: the rejected row and the reason.
   - Each batch is written in **one transaction**.
   - A unit that arrives again unchanged (same fingerprint) is ignored. A unit that arrives with **different values** (for example, after rework) is updated and re-scored, and the old score moves to history.
@@ -146,7 +146,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   - failed batch writes nothing and retries; backoff 1, 2, 4, 8, 16, 30, 30 s; idle heartbeat without run rows; rework re-scored with a new hold only on change; broken listener; restart equals uninterrupted; factory and gate running concurrently; replaced feed stalls;
   - baseline: drift warns but verdicts unchanged; restart records promotion; same version with different content refused; rescore keeps history and is idempotent;
   - **golden run** (simulator with rework and bad-row injection → feed → runner): 200,000 real units, **193,500 PASS / 6,498 FLAG / 2 QUARANTINE, identical to `classify()` on every unit** (verdict, reasons, D); GLDR-0421 held 02-06 03:00 (final QC 04:00) and GLDR-200000 held 02-18 07:00 (final QC 08:00), both passed by QC; 672 blank-ID rows rejected, 672 `ERR` rows quarantined INCOMPLETE; 671 rework republishes of 670 units, each re-scored once, the one identical repeat ignored.
-- **Measured:** simulator and gate as two concurrent processes over the full month: the factory finished publishing in 23 s and the gate caught up at 117 s (about 140–170 ms per build hour), 672 runs, 0 errors, totals 2 / 6,498 / 193,500. Run-log timestamps currently have 1-second resolution; Step 4 moves them to milliseconds for batch-latency health.
+- **Measured:** simulator and gate as two concurrent processes over the full month: the factory finished publishing in 24 s and the gate caught up at 117 s; 672 runs, 0 errors, totals 2 / 6,498 / 193,500. Per-batch `duration_ms` (fetch → validate → score → write, monotonic clock): median 137 ms, p95 157 ms, p99 243 ms, max 300 ms for a median of 298 units (0.46 ms per unit). At the default speed of one build hour every 2 s, the gate is busy 6.9% of each interval (median), 15% worst case.
 
 ### Step 4: Health, `pipeline/health.py`
 

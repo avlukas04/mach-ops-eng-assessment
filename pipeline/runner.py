@@ -141,13 +141,14 @@ def validate(frame):
 
 class Runner:
     def __init__(self, source, db_path, baseline_path=spc.DEFAULT_BASELINE,
-                 poll_s=1.0, heartbeat_s=10.0, listeners=()):
+                 poll_s=1.0, heartbeat_s=10.0, listeners=(), clock=time.monotonic):
         self.source = source
         self.db_path = db_path
         self.baseline_path = baseline_path
         self.poll_s = poll_s
         self.heartbeat_s = heartbeat_s
         self.listeners = list(listeners)
+        self._clock = clock  # monotonic: batch durations survive wall-clock changes
         self.base, self.base_sha = read_baseline(baseline_path)  # pinned
         self.store = None
         self.cursor = None
@@ -256,7 +257,7 @@ class Runner:
 
     def run_once(self):
         """Process one batch. Returns rows read (0 when idle)."""
-        started = utc_now()
+        started, started_mono = utc_now(), self._clock()
         feed_id = self._check_feed_identity()
         batch = self.source.fetch_new(self.cursor)
         if not len(batch):
@@ -287,7 +288,7 @@ class Runner:
             todo, [by_id[u["vehicle_id"]] for u in todo],
             baseline_version=self.base["version"], sim_time=batch.sim_time,
             unchanged=d["unchanged"], rows_read=len(batch.frame), errors=errors,
-            rejected=rejected, started_at=started,
+            rejected=rejected, started_at=started, started_mono=started_mono, mono=self._clock,
             meta={"cursor": batch.cursor, "sim_time": batch.sim_time, "feed_id": feed_id,
                   "feed_clock": batch.sim_time, "last_batch_at": utc_now()})
         self.cursor = batch.cursor
@@ -303,6 +304,7 @@ class Runner:
                           "final_qc_pass": u.get("final_qc_pass"),
                           "reasons": by_id[vid]["reasons"]})
         summary = dict(out, sim_time=batch.sim_time, rows_read=len(batch.frame),
+                       duration_ms=int(round((self._clock() - started_mono) * 1000)),
                        errors=len(errors), holds=holds)
         for fn in self.listeners:
             try:

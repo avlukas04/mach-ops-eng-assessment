@@ -40,6 +40,7 @@ import math
 import re
 import sqlite3
 import threading
+import time
 
 SCHEMA_VERSION = 1
 
@@ -64,7 +65,9 @@ _TYPES = ("REAL", "INTEGER", "TEXT")
 
 
 def utc_now():
-    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    # Milliseconds so runs in the same second still sort; durations are NOT
+    # derived from these (wall clocks can be adjusted), see runs.duration_ms
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="milliseconds")
 
 
 def _ident(name):
@@ -135,6 +138,7 @@ class Store:
   sha256 TEXT NOT NULL,
   previous_version TEXT,
   previous_sha256 TEXT)""")
+            self._migrate()
         self.unit_columns = self._load_unit_columns()
 
     def close(self):
@@ -202,7 +206,8 @@ CREATE TABLE runs (
   unchanged INTEGER NOT NULL,
   rejected INTEGER NOT NULL,
   quarantines_raised INTEGER NOT NULL,
-  baseline_version TEXT
+  baseline_version TEXT,
+  duration_ms INTEGER
 );
 CREATE TABLE ingest_errors (
   id INTEGER PRIMARY KEY,
@@ -221,6 +226,13 @@ COMMIT;""")
             for col in INDEXED_UNIT_COLS:
                 if col in columns:
                     c.execute(f"CREATE INDEX units_{col} ON units({_ident(col)})")
+
+    def _migrate(self):
+        """Bring a database created by an earlier version up to date.
+        Added columns are NULL for old rows: unknown, not invented."""
+        runs_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runs)")}
+        if "duration_ms" not in runs_cols:
+            self.conn.execute("ALTER TABLE runs ADD COLUMN duration_ms INTEGER")
 
     @staticmethod
     def _score_col_ddl():
@@ -277,7 +289,7 @@ COMMIT;""")
 
     def write_batch(self, units, scores, *, baseline_version, sim_time=None,
                     unchanged=0, rows_read=None, errors=(), rejected=None,
-                    meta=None, started_at=None):
+                    meta=None, started_at=None, started_mono=None, mono=time.monotonic):
         """Write one ingest cycle in a single transaction.
 
         units:  rows from diff() (new and changed), each with "_fingerprint"
@@ -286,6 +298,10 @@ COMMIT;""")
         rejected: rows dropped entirely (default: len(errors)); a row can be
                   logged as an error and still be stored and scored
         meta:   key/value state to save with the batch (e.g. source cursor)
+        started_mono, mono: start of the cycle on a monotonic clock, and that
+                clock. duration_ms = mono() - started_mono, taken just before
+                the run row is written, so it covers fetch through write and
+                is immune to wall-clock adjustments.
 
         Raises ValueError, and writes nothing, if any step fails.
         """
@@ -355,14 +371,16 @@ COMMIT;""")
 
                 n_err = len(errors) if rejected is None else rejected
                 rows_default = len(units) + unchanged + n_err
+                duration_ms = (None if started_mono is None
+                               else int(round((mono() - started_mono) * 1000)))
                 cur = c.execute(
                     "INSERT INTO runs (started_at, finished_at, sim_time, rows_read, new, changed, "
-                    "unchanged, rejected, quarantines_raised, baseline_version) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "unchanged, rejected, quarantines_raised, baseline_version, duration_ms) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (started_at, utc_now(), sim_time,
                      rows_read if rows_read is not None else rows_default,
                      counts["new"], counts["changed"], unchanged, n_err,
-                     counts["quarantines_raised"], baseline_version))
+                     counts["quarantines_raised"], baseline_version, duration_ms))
                 run_id = cur.lastrowid
                 for vid, reason, raw in errors:
                     c.execute("INSERT INTO ingest_errors (run_id, vehicle_id, reason, raw, created_at) "

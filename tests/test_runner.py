@@ -216,6 +216,21 @@ class ReliabilityTest(RunnerTestBase):
                          ["PASS", "QUARANTINE"])
         self.assertEqual(len(r.store.get_events("A")), 1)
 
+    def test_duration_immune_to_wall_clock_jumps(self):
+        from unittest import mock
+        mono = iter(x * 0.25 for x in range(100))   # +250 ms per reading
+        wall = iter(f"2026-03-01T12:00:{59 - k:02d}.000+00:00" for k in range(100))  # runs backwards
+        r = self.runner(ScriptedSource([[unit("A")]]), clock=lambda: next(mono))
+        got = []
+        r.listeners.append(got.append)
+        with mock.patch("pipeline.store.utc_now", lambda: next(wall)), \
+                mock.patch("pipeline.runner.utc_now", lambda: next(wall)):
+            r.run_once()
+        run = dict(r.store.conn.execute("SELECT started_at, finished_at, duration_ms FROM runs").fetchone())
+        self.assertLess(run["finished_at"], run["started_at"])  # wall clock went backwards...
+        self.assertEqual(run["duration_ms"], 250)                # ...duration is still right
+        self.assertEqual(got[0]["duration_ms"], 500)              # summary: start to after commit
+
     def test_broken_listener_does_not_stop_gate(self):
         def boom(_):
             raise RuntimeError("dashboard down")

@@ -145,6 +145,24 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(tuple(err), (r["run_id"], "vehicle_id empty"))
         self.assertEqual(self.db.get_meta("cursor"), 1)
 
+    def test_duration_recorded_from_monotonic_clock(self):
+        ticks = iter([10.0, 10.123])  # start, then just before the run row
+        rows = self.db.diff([unit("A")])["new"]
+        self.db.write_batch(rows, [score("A")], baseline_version="v1",
+                            started_mono=next(ticks), mono=lambda: next(ticks))
+        self.assertEqual(self.db.conn.execute("SELECT duration_ms FROM runs").fetchone()[0], 123)
+
+    def test_old_database_gains_duration_column(self):
+        self.ingest([unit("A")])
+        self.db.conn.execute("ALTER TABLE runs DROP COLUMN duration_ms")  # as built before
+        self.db.close()
+        self.db = st.Store(self.path)
+        cols = [r["name"] for r in self.db.conn.execute("PRAGMA table_info(runs)")]
+        self.assertIn("duration_ms", cols)
+        old = dict(self.db.conn.execute("SELECT * FROM runs").fetchone())
+        self.assertEqual((old["new"], old["duration_ms"]), (1, None))  # unknown, not invented
+        self.assertEqual(self.db.table_count("units"), 1)
+
     def test_reopen_resumes(self):
         self.ingest([unit("A")])
         self.db.close()
