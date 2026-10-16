@@ -198,6 +198,17 @@ class MesSource:
         info = conn.execute(f"PRAGMA table_info({FEED_TABLE})").fetchall()
         return {name: typ for _, name, typ, *_ in info if name not in FEED_COLS} or None
 
+    def feed_id(self):
+        """Unique ID of this feed; changes if the feed is deleted and recreated."""
+        conn = self._connect()
+        if conn is None:
+            return None
+        try:
+            r = conn.execute("SELECT value FROM feed_meta WHERE key='feed_id'").fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return r[0] if r else None
+
     def feed_clock(self):
         conn = self._connect()
         if conn is None:

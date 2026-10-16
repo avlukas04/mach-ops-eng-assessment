@@ -12,7 +12,8 @@ Feed (outputs/live/mes.db)
   production_units  append-only: seq (increasing), published_sim (clock time
                     the row was published), then every manufacturing.csv column.
                     A changed unit is published again as a new row (newest wins).
-  feed_meta         next_hour (resume point), sim_time (factory clock)
+  feed_meta         feed_id (unique per feed, so a gate notices a replaced
+                    feed), next_hour (resume point), sim_time (factory clock)
 
 Test injections (off by default; clearly marked so they can't be mistaken for
 real data):
@@ -34,6 +35,7 @@ Stopping and starting again resumes from the next unpublished hour.
 
 import argparse
 import os
+import uuid
 import sqlite3
 import sys
 import time
@@ -76,6 +78,8 @@ CREATE TABLE IF NOT EXISTS {FEED_TABLE} (
 );
 CREATE INDEX IF NOT EXISTS {FEED_TABLE}_published ON {FEED_TABLE}(published_sim, seq);
 CREATE TABLE IF NOT EXISTS feed_meta (key TEXT PRIMARY KEY, value TEXT);""")
+        self.conn.execute("INSERT OR IGNORE INTO feed_meta VALUES ('feed_id', ?)",
+                          (uuid.uuid4().hex,))
         names = ", ".join(_ident(c) for c in self.columns)
         self._insert = (f"INSERT INTO {FEED_TABLE} (published_sim, {names}) "
                         f"VALUES (?, {', '.join('?' * len(self.columns))})")

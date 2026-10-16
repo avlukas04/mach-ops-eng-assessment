@@ -113,33 +113,40 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   - CSV watcher: first read, unchanged file, added and edited rows only, half-written file never parsed.
 - **Measured:** publishing the month at `max` 22 s; gate ingest (fetch, score, store) 144 ms per build hour (slowest 215 ms), 97 s for the month, down from 649 ms per hour. End to end it reproduces 2 / 6,498 / 193,500 with holds at 02-06 03:00 and 02-18 07:00. At the default speed the gate uses about 7% of each 2-second interval.
 
-### Step 3: Runner, `pipeline/runner.py`
+### Step 3: Runner, `pipeline/runner.py` (done)
 
-- **What:** the loop that keeps judging the data: fetch → validate → score → store → health → notify.
+- **What:** the gate running unattended: fetch → validate → score → store → report, with a heartbeat when idle.
 - **How:**
-  1. **Fetch** the next batch from the source.
-  2. **Validate** each row:
-     - required columns present;
-     - the 25 bench readings parse as numbers;
-     - `vehicle_id` not empty.
+  1. **Fetch** from the saved cursor. The cursor is written in the same transaction as its batch, so a crash never loses or repeats data. Each feed carries a unique `feed_id`; if the feed is replaced, the gate stalls with a clear message instead of silently waiting past the new feed's sequence numbers.
+  2. **Validate**, on the principle that a unit with a valid ID always gets a verdict:
 
-     Rows that fail go to `ingest_errors` with the reason. A row with a missing bench reading is **not** rejected: it is scored, and the gate quarantines it as `INCOMPLETE` (fail closed).
-  3. **Score** with `spc_detector.classify(batch, baseline)`, the same tested code and the same frozen baseline as the command-line tool.
-  4. **Store** units, scores and a `QUARANTINE_RAISED` event for each new hold, in one transaction.
-  5. **Update health** (Step 4).
-  6. **Notify** the API so it can push an update to open browsers.
-
-  Command line: `python3 -m pipeline.runner --feed outputs/live/mes.db` (for testing, with no web server), alongside `python3 tools/factory_simulator.py --speed max`.
-- **Why:**
-  - Scoring each unit the moment it arrives is what puts a verdict in front of people before final QC, 1–9 hours after build (I1).
-  - Reusing `spc_detector` means the live gate is exactly the gate that was tested and verified, including the combined score (I2) and ceiling tags (I7).
-  - Because the baseline is frozen, scoring in hourly batches must give **identical** verdicts to scoring all 200,000 at once. The golden test proves it rather than assuming it.
+     | Problem | Handling |
+     |:--|:--|
+     | Blank `vehicle_id` | Rejected and logged (it cannot be held or traced) |
+     | Non-numeric bench reading (e.g. `ERR`) | Logged with column and value, stored as not measured, **QUARANTINE INCOMPLETE** (fail closed) |
+     | Blank bench reading | QUARANTINE INCOMPLETE, not logged as an error |
+     | Required column missing (schema change) | Whole batch refused, cursor kept, logged once, status `STALLED` until fixed |
+     | Unknown extra column | Dropped, logged once |
+  3. **Score** with `spc_detector.classify` and the baseline pinned at start.
+  4. **Store** in one transaction: units, scores, history, new holds, errors, run log, cursor.
+  5. **Report** to listeners (Step 4 health and Step 5 live push plug in here). The command line prints each hold with its lead time before final QC and QC's own result.
+  6. **Heartbeat** about every 10 s: `last_poll_at`, the feed's clock, runner status and baseline status in `meta`. Empty polls are not logged as runs.
+  7. **Failures** retry the same cursor with backoff (1, 2, 4 … 30 s). A batch is never skipped; a broken listener never stops the gate.
+- **Baseline control (approved decision: pin, warn, promote by restart):**
+  - *Pin:* loaded once at start; version and SHA-256 recorded; every score carries the version.
+  - *Warn on drift:* each heartbeat re-hashes the file. If it differs, is missing or unreadable, `meta.baseline` says so and one warning is logged. **Scoring does not change.**
+  - *Promote by restart:* the `baselines` table records each activation and the one it replaced. Re-using a version with different content is refused, so a version always means one exact file.
+  - *`--rescore`:* explicit; re-scores units scored under another baseline, keeping old scores in `score_history`; a hold is raised only if a unit newly becomes QUARANTINE.
+  - *Why:* this is how quality and ML teams control rule changes. Nobody can change production verdicts by editing a file, and every verdict stays reproducible. The cost is that adopting a baseline needs a restart, which is acceptable for rules that should change rarely and deliberately.
+- **Why (overall):** scoring each unit on arrival puts a verdict in front of people 1–9 h before final QC (I1); reusing `spc_detector` means the live gate is the verified gate (I2, I7); storing QC's result next to the gate's verdict records the Part 2 gap per unit.
 - **Problems addressed:** I1, I2, I6, I7, I10, I11.
-- **Golden tests:**
-  - after a full replay the database holds exactly **2 QUARANTINE / 6,498 FLAG / 193,500 PASS**, matching `spc_detector score` vehicle for vehicle;
-  - GLDR-0421 is raised at simulated **02-06 03:00**, an hour before its 04:00 QC timestamp;
-  - GLDR-200000 is raised at **02-18 07:00**, before its 08:00 QC timestamp;
-  - a row with a blanked reading is quarantined as `INCOMPLETE`.
+- **Command line:** `python3 -m pipeline.runner [--feed … | --csv …] [--db …] [--reset] [--once] [--rescore] [--poll 1] [--quiet]`.
+- **Checks (`tests/test_runner.py`, 22 tests), all passing:**
+  - validation rules above, one test each; a median unit passes and a stiff-aileron unit is quarantined `SIGNATURE`;
+  - failed batch writes nothing and retries; backoff 1, 2, 4, 8, 16, 30, 30 s; idle heartbeat without run rows; rework re-scored with a new hold only on change; broken listener; restart equals uninterrupted; factory and gate running concurrently; replaced feed stalls;
+  - baseline: drift warns but verdicts unchanged; restart records promotion; same version with different content refused; rescore keeps history and is idempotent;
+  - **golden run** (simulator with rework and bad-row injection → feed → runner): 200,000 real units, **193,500 PASS / 6,498 FLAG / 2 QUARANTINE, identical to `classify()` on every unit** (verdict, reasons, D); GLDR-0421 held 02-06 03:00 (final QC 04:00) and GLDR-200000 held 02-18 07:00 (final QC 08:00), both passed by QC; 672 blank-ID rows rejected, 672 `ERR` rows quarantined INCOMPLETE; 671 rework republishes of 670 units, each re-scored once, the one identical repeat ignored.
+- **Measured:** simulator and gate as two concurrent processes over the full month: the factory finished publishing in 23 s and the gate caught up at 117 s (about 140–170 ms per build hour), 672 runs, 0 errors, totals 2 / 6,498 / 193,500. Run-log timestamps currently have 1-second resolution; Step 4 moves them to milliseconds for batch-latency health.
 
 ### Step 4: Health, `pipeline/health.py`
 

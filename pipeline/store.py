@@ -30,6 +30,7 @@ Tables
   runs           one row per ingest cycle
   ingest_errors  rows the runner rejected, with the reason
   meta           small key/value state (source cursor, simulated clock)
+  baselines      each baseline activation (version, file hash, the one replaced)
 """
 
 import datetime as dt
@@ -127,6 +128,13 @@ class Store:
         self.conn.row_factory = sqlite3.Row
         if not readonly:
             self._create_schema(columns)
+            self.conn.execute("""CREATE TABLE IF NOT EXISTS baselines (
+  id INTEGER PRIMARY KEY,
+  activated_at TEXT NOT NULL,
+  version TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  previous_version TEXT,
+  previous_sha256 TEXT)""")
         self.unit_columns = self._load_unit_columns()
 
     def close(self):
@@ -268,13 +276,15 @@ COMMIT;""")
         return {"new": new, "changed": changed, "unchanged": unchanged}
 
     def write_batch(self, units, scores, *, baseline_version, sim_time=None,
-                    unchanged=0, rows_read=None, errors=(), meta=None,
-                    started_at=None):
+                    unchanged=0, rows_read=None, errors=(), rejected=None,
+                    meta=None, started_at=None):
         """Write one ingest cycle in a single transaction.
 
         units:  rows from diff() (new and changed), each with "_fingerprint"
         scores: one classify() result row (dict) per unit
-        errors: (vehicle_id, reason, raw_row) for rejected rows
+        errors: (vehicle_id, reason, raw_row) for every logged ingest problem
+        rejected: rows dropped entirely (default: len(errors)); a row can be
+                  logged as an error and still be stored and scored
         meta:   key/value state to save with the batch (e.g. source cursor)
 
         Raises ValueError, and writes nothing, if any step fails.
@@ -335,6 +345,7 @@ COMMIT;""")
                         event_vals.append((vid, GATE_EVENT, s.get("reasons") or "QUARANTINE",
                                            sim_time, now))
                 counts["quarantines_raised"] = len(event_vals)
+                holds = [e[0] for e in event_vals]
                 c.executemany(unit_sql, unit_vals)
                 c.executemany(score_sql, score_vals)
                 c.executemany(hist_sql, score_vals)
@@ -342,13 +353,14 @@ COMMIT;""")
                     "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
                     "VALUES (?, ?, 'gate', ?, ?, ?)", event_vals)
 
-                n_err = len(errors)
+                n_err = len(errors) if rejected is None else rejected
+                rows_default = len(units) + unchanged + n_err
                 cur = c.execute(
                     "INSERT INTO runs (started_at, finished_at, sim_time, rows_read, new, changed, "
                     "unchanged, rejected, quarantines_raised, baseline_version) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (started_at, utc_now(), sim_time,
-                     rows_read if rows_read is not None else len(units) + unchanged + n_err,
+                     rows_read if rows_read is not None else rows_default,
                      counts["new"], counts["changed"], unchanged, n_err,
                      counts["quarantines_raised"], baseline_version))
                 run_id = cur.lastrowid
@@ -359,12 +371,105 @@ COMMIT;""")
                 for k, v in (meta or {}).items():
                     c.execute("INSERT OR REPLACE INTO meta VALUES (?, ?)", (k, json.dumps(v)))
                 c.execute("COMMIT")
-            except Exception as e:
+            except BaseException as e:  # including Ctrl-C: never half a batch
                 c.execute("ROLLBACK")
                 if isinstance(e, sqlite3.Error):
                     raise ValueError(f"batch rejected, nothing written: {e}") from e
                 raise
-        return dict(counts, unchanged=unchanged, rejected=len(errors), run_id=run_id)
+        return dict(counts, unchanged=unchanged, rejected=n_err, run_id=run_id, holds=holds)
+
+    def rescore_batch(self, scores, *, baseline_version, sim_time=None):
+        """Replace current scores (unit facts untouched) in one transaction.
+        Old scores stay in score_history; a hold is raised only when a unit
+        newly becomes QUARANTINE. Returns the vehicle_ids newly held."""
+        if self.readonly:
+            raise RuntimeError("read-only store")
+        now = utc_now()
+        ids = [s["vehicle_id"] for s in scores]
+        names = ["vehicle_id"] + SCORE_COLS + ["baseline_version", "fingerprint",
+                                               "scored_sim", "scored_at"]
+        ph = ", ".join("?" * len(names))
+        with self._lock:
+            c = self.conn
+            try:
+                c.execute("BEGIN IMMEDIATE")
+                fps = self._lookup("SELECT vehicle_id, fingerprint FROM units", ids)
+                if set(fps) != set(ids):
+                    raise ValueError("rescore: unknown vehicle_id")
+                prev = self._lookup("SELECT vehicle_id, verdict FROM scores", ids)
+                vals = [[s["vehicle_id"]] + [_clean(s.get(k)) for k in SCORE_COLS]
+                        + [baseline_version, fps[s["vehicle_id"]], sim_time, now] for s in scores]
+                holds = [s["vehicle_id"] for s in scores
+                         if s["verdict"] == "QUARANTINE" and prev.get(s["vehicle_id"]) != "QUARANTINE"]
+                c.executemany(f"INSERT OR REPLACE INTO scores ({', '.join(names)}) VALUES ({ph})", vals)
+                c.executemany(f"INSERT INTO score_history ({', '.join(names)}) VALUES ({ph})", vals)
+                c.executemany(
+                    "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
+                    "VALUES (?, ?, 'gate', ?, ?, ?)",
+                    [(v, GATE_EVENT, "rescore under baseline " + baseline_version, sim_time, now)
+                     for v in holds])
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+        return holds
+
+    def units_needing_rescore(self, baseline_version, limit=5000):
+        """Up to `limit` units (source columns) scored under another baseline."""
+        import pandas as pd  # only needed here
+        cols = ", ".join(f"u.{_ident(c)}" for c in self.unit_columns)
+        return pd.read_sql_query(
+            f"SELECT {cols} FROM units u JOIN scores s USING (vehicle_id) "
+            "WHERE s.baseline_version != ? LIMIT ?", self.conn, params=(baseline_version, limit))
+
+    def count_other_baselines(self, baseline_version):
+        return self.conn.execute("SELECT COUNT(*) FROM scores WHERE baseline_version != ?",
+                                 (baseline_version,)).fetchone()[0]
+
+    def record_baseline(self, version, sha256):
+        """Record the baseline this runner pinned at start (the promotion step).
+
+        Raises ValueError if this version was recorded before with different
+        content: one version must always mean one exact file.
+        Returns {"promoted": bool, "previous": (version, sha256) or None}.
+        """
+        with self._lock:
+            c = self.conn
+            clash = c.execute("SELECT sha256 FROM baselines WHERE version=? AND sha256!=? LIMIT 1",
+                              (version, sha256)).fetchone()
+            if clash:
+                raise ValueError(
+                    f"baseline version {version!r} was used before with different content "
+                    f"(sha256 {clash[0][:12]}…); give the new baseline a new version")
+            last = c.execute("SELECT version, sha256 FROM baselines ORDER BY id DESC LIMIT 1").fetchone()
+            prev = (last[0], last[1]) if last else None
+            if prev and prev[1] == sha256:
+                return {"promoted": False, "previous": prev}
+            c.execute("INSERT INTO baselines (activated_at, version, sha256, previous_version, "
+                      "previous_sha256) VALUES (?, ?, ?, ?, ?)",
+                      (utc_now(), version, sha256, prev[0] if prev else None,
+                       prev[1] if prev else None))
+        return {"promoted": True, "previous": prev}
+
+    def log_error(self, vehicle_id, reason, raw=None):
+        """Log an ingest problem outside a batch (e.g. a refused batch)."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO ingest_errors (run_id, vehicle_id, reason, raw, created_at) "
+                "VALUES (NULL, ?, ?, ?, ?)", (vehicle_id, reason, json.dumps(raw, default=str), utc_now()))
+
+    def set_meta(self, values):
+        """Save small state (heartbeat, status) in its own transaction."""
+        with self._lock:
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)",
+                              [(k, json.dumps(v)) for k, v in values.items()])
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
 
     def add_event(self, vehicle_id, event_type, actor, note, at_sim=None):
         """Record a human sign-off. Who and why are required."""
@@ -415,6 +520,7 @@ COMMIT;""")
         return out
 
     def table_count(self, table):
-        if table not in ("units", "scores", "score_history", "events", "runs", "ingest_errors"):
+        if table not in ("units", "scores", "score_history", "events", "runs", "ingest_errors",
+                         "baselines"):
             raise ValueError(table)
         return self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
