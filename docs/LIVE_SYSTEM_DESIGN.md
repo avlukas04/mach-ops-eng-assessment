@@ -69,7 +69,7 @@ Plus a **system health** strip for everyone: last update, data freshness, ingest
 
 The system must run unattended: new units are picked up automatically, scored in well under a second, and appear on every open dashboard without a refresh. It must also tell people when *it* is unhealthy (no data arriving, inputs rejected, assumptions broken), because a monitoring system that fails silently recreates the 100%-pass problem.
 
-The assessment data is static, so a **replay** source streams the 200,000 units in build-time order (for example, one build-hour every 2 seconds plays the month in about 22 minutes). Swapping replay for the factory database is a change to one adapter.
+The assessment data is static, so a separate **factory simulator** process publishes the 200,000 units into a feed table in build-time order (for example, one build-hour every 2 seconds plays the month in about 22 minutes). The gate reads that feed by sequence number exactly as it would read an MES table, so connecting to the real factory database changes only the connection and column names.
 
 ### 1.6 Requirement traceability
 
@@ -141,7 +141,7 @@ Following GLDR-0421 through the replay:
 | Layer | Technology | What it does here | Why this choice |
 |:--|:--|:--|:--|
 | Scoring | **Python, NumPy, pandas** + `tools/spc_detector.py` | Validates and scores each batch | Reuses the exact gate that was tested and verified; vectorised scoring handles 200,000 units in about 4 s, so a batch of hundreds takes milliseconds |
-| Source | **Python adapter class** (`fetch_new(cursor)`) | Replay today; MES / database query in production | One interface; swapping data sources touches one file |
+| Source | **Python adapter class** (`fetch_new(cursor)`) | `MesSource` reading a feed written by the factory simulator today; the real MES table in production | One interface; swapping data sources touches one file |
 | Runner | **Background worker** (asyncio task in the API process) | Polls the source every few seconds, runs ingest → score → store → health | Simple to run (one command), no separate queue to operate; can be split into its own process later |
 | Store | **SQLite in WAL mode** | Units, scores, history, runs, events, errors | Single file, no server, safe concurrent reads while the worker writes; schema written to move to **Postgres** in production |
 | API | **FastAPI + Uvicorn** | JSON endpoints for each view; auto-generated API docs at `/docs` | Typed responses catch contract errors; async fits the background worker; docs make the API usable by other tools (MES, alerts) |
@@ -210,7 +210,7 @@ Alternatives considered. The system has two jobs: **ingest** (pull, score and st
 | Step | Deliverable | Check |
 |:--|:--|:--|
 | 1 | `pipeline/store.py`: schema, data access | Insert; idempotent re-insert; conflicting duplicate → ingest error |
-| 2 | `pipeline/source.py`: replay adapter | Full replay yields 200,000 unique units in build order |
+| 2 | `pipeline/source.py` + `tools/factory_simulator.py`: feed and adapters | Full month through the feed yields 200,000 unique units in build order (done) |
 | 3 | `pipeline/runner.py`: ingest → score → store | After full replay, DB counts = 2 / 6,498 / 193,500 (golden test); GLDR-0421 raised at 02-06 03:00 |
 | 4 | `pipeline/health.py`: p-charts, freshness, correlation, ceilings | FLAG rate 3.25%; all groups in control; max \|r\| ≈ 0.006; 1,028 saturated |
 | 5 | `dashboard/app.py`: API + SSE | Endpoint tests on the replayed DB |

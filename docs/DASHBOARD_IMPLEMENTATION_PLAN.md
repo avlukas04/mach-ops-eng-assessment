@@ -87,21 +87,31 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   - a batch that fails midway leaves no partial rows;
   - events are recorded with who and when.
 
-### Step 2: Source, `pipeline/source.py`
+### Step 2: Source, `pipeline/source.py` and `tools/factory_simulator.py` (done)
 
-- **What:** where units come from, behind one interface: `fetch_new(cursor) → (rows, new_cursor, sim_time)`.
+- **What:** where units come from, behind one interface: `fetch_new(cursor) → Batch(frame, cursor, sim_time)`. The factory and the gate are **separate processes** connected only by a feed, as they would be in a plant.
 - **How:**
-  - **ReplaySource:**
-    - Loads `manufacturing.csv`, sorts it by `build_date_utc`, and groups it into the 672 build hours (about 298 units each).
-    - Each call returns the next hour and advances a **simulated clock** to that hour.
-    - `--speed` sets seconds of real time per build hour: 2 s plays the month in about 22 minutes; `max` plays it instantly.
-  - **CsvWatchSource:** checks the file's modification time and returns rows with unseen IDs, standing in for a live export.
-  - A factory adapter (MES or database query by timestamp) would be a third class with the same interface.
+  - **Factory simulator** (`tools/factory_simulator.py`), the only simulated part:
+    - Publishes `manufacturing.csv` into a feed database (`outputs/live/mes.db`, table `production_units`) one build hour at a time, in one transaction per hour, each row with an increasing `seq` and its `published_sim` time.
+    - `--speed` sets seconds of real time per build hour: 2 s plays the month in about 22 minutes; `max` publishes it in about 22 s. Stopping and restarting resumes at the next unpublished hour; `--reset` starts over.
+    - Test injections, off by default and clearly marked: `--rework N` republishes N earlier units per hour with rework code `SIM`; `--bad-rows N` publishes malformed rows (blank ID, or `SIMBAD-` ID with a bench reading of `ERR`).
+  - **MesSource**, the gate's live connection: pulls `seq > cursor` from the feed over a read-only connection, the standard incremental read from an MES or warehouse table.
+    - A batch never crosses a published hour (indexed on `published_sim, seq`), so every unit keeps its true arrival time even when a late-starting gate catches up; batches are capped at 5,000 rows.
+    - On an empty poll `sim_time` is the feed's own clock, so the gate knows whether the factory is alive. If the feed doesn't exist yet, it returns empty batches until it does.
+  - **CsvWatchSource**, for plants that drop file exports: reads the file only once it has settled (same size and time on two polls, ends with a newline), then returns only new or changed rows.
+  - **ReplaySource**: the CSV in build order by hour; used by the simulator and as a fast test loader.
+  - **Pacer**: schedules hour *k* at start + *k* × speed, so processing time never makes the replay drift slow.
+  - **Store speedup**: `write_batch` now uses one `executemany` per table and one lookup per batch.
 - **Why:**
-  - Scoring and display never depend on where data comes from, so moving to a real feed changes one file.
-  - The simulated clock makes "before final QC" and "time in queue" measurable in the demo, which is the core of "flag before shipment".
-- **Problems addressed:** I10 (the system processes every record, in order).
-- **Check:** a full replay returns exactly 200,000 unique units across 672 hours, in build order, with the simulated clock ending at 2026-02-28 23:00.
+  - A gate reading a feed written by another process is a real live connection, not a file played inside the dashboard. Against a real MES only the connection and column names change.
+  - Scoring and display never depend on where data comes from.
+  - The simulated clock makes "before final QC" and "time in queue" measurable, which is the core of "flag before shipment".
+- **Problems addressed:** I10 (every record processed, in order, exactly once).
+- **Checks (`tests/test_source.py`, 23 tests), all passing:**
+  - full month through simulator → feed → MesSource: 200,000 unique units, identical to the CSV's IDs; 672 hours in order ending 2026-02-28 23:00; every unit's build hour equals its arrival hour; GLDR-0421 arrives 02-06 03:00 and GLDR-200000 02-18 07:00; GLDR-0421's values unchanged through the feed;
+  - gate started before the factory, late gate catching up, gate restart equal to an uninterrupted run, factory restart resuming, pacing, rework republishing, bad rows delivered (blank IDs never merged);
+  - CSV watcher: first read, unchanged file, added and edited rows only, half-written file never parsed.
+- **Measured:** publishing the month at `max` 22 s; gate ingest (fetch, score, store) 144 ms per build hour (slowest 215 ms), 97 s for the month, down from 649 ms per hour. End to end it reproduces 2 / 6,498 / 193,500 with holds at 02-06 03:00 and 02-18 07:00. At the default speed the gate uses about 7% of each 2-second interval.
 
 ### Step 3: Runner, `pipeline/runner.py`
 
@@ -119,7 +129,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   5. **Update health** (Step 4).
   6. **Notify** the API so it can push an update to open browsers.
 
-  Command line: `python3 -m pipeline.runner --replay --speed max` (for testing, with no web server).
+  Command line: `python3 -m pipeline.runner --feed outputs/live/mes.db` (for testing, with no web server), alongside `python3 tools/factory_simulator.py --speed max`.
 - **Why:**
   - Scoring each unit the moment it arrives is what puts a verdict in front of people before final QC, 1–9 hours after build (I1).
   - Reusing `spc_detector` means the live gate is exactly the gate that was tested and verified, including the combined score (I2) and ceiling tags (I7).
@@ -230,7 +240,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
 
 ### Step 7: One command and documentation
 
-- **What:** `python3 -m dashboard --replay --speed 2 [--reset]` starts the replay, the API and the page and opens `http://127.0.0.1:8000`. Updates to REPORT §7 (tools table, run instructions, how the dashboard addresses each README bullet), the handoff doc, and the presentation guide's demo order.
+- **What:** `python3 -m dashboard --speed 2 [--reset]` starts the factory simulator and the gate (runner, API and page) as separate processes and opens `http://127.0.0.1:8000`. Updates to REPORT §7 (tools table, run instructions, how the dashboard addresses each README bullet), the handoff doc, and the presentation guide's demo order.
 - **Why:** a reviewer should be able to see it running with one command, and the report should explain it.
 - **Check:** from a fresh clone, install and run; units start arriving within seconds.
 

@@ -235,6 +235,16 @@ COMMIT;""")
 
     # ------------------------------------------------------------------ writes
 
+    def _lookup(self, select, ids):
+        """{vehicle_id: value} for `select` ("SELECT vehicle_id, x FROM t"),
+        restricted to ids, in chunks under SQLite's parameter limit."""
+        out = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            q = f"{select} WHERE vehicle_id IN ({','.join('?' * len(chunk))})"
+            out.update(self.conn.execute(q, chunk).fetchall())
+        return out
+
     def diff(self, rows):
         """Split incoming rows into new, changed and unchanged by fingerprint.
 
@@ -244,12 +254,7 @@ COMMIT;""")
         latest = {}
         for r in rows:
             latest[r["vehicle_id"]] = r
-        known = {}
-        ids = list(latest)
-        for i in range(0, len(ids), 900):  # SQLite parameter limit
-            chunk = ids[i:i + 900]
-            q = f"SELECT vehicle_id, fingerprint FROM units WHERE vehicle_id IN ({','.join('?' * len(chunk))})"
-            known.update(self.conn.execute(q, chunk).fetchall())
+        known = self._lookup("SELECT vehicle_id, fingerprint FROM units", list(latest))
         new, changed, unchanged = [], [], 0
         for vid, r in latest.items():
             fp = fingerprint({k: v for k, v in r.items() if not k.startswith("_")})
@@ -303,34 +308,39 @@ COMMIT;""")
         score_sql = f"INSERT OR REPLACE INTO scores ({', '.join(score_names)}) VALUES ({placeholders})"
         hist_sql = f"INSERT INTO score_history ({', '.join(score_names)}) VALUES ({placeholders})"
 
+        # Build every parameter row first, then write each table with one
+        # executemany (one SQL call per table instead of five per unit).
+        unit_vals, score_vals, event_vals = [], [], []
+        for u in units:
+            vid = u["vehicle_id"]
+            unit_vals.append([vid] + [_clean(u.get(k)) for k in data_cols]
+                             + [u["_fingerprint"], sim_time, sim_time, now])
+            s = score_by_id[vid]
+            score_vals.append([vid] + [_clean(s.get(k)) for k in SCORE_COLS] + [
+                baseline_version, u["_fingerprint"], sim_time, now])
+
         counts = {"new": 0, "changed": 0, "quarantines_raised": 0}
         with self._lock:
             c = self.conn
             try:
                 c.execute("BEGIN IMMEDIATE")
-                for u in units:
-                    vid = u["vehicle_id"]
-                    prev = c.execute("SELECT verdict FROM scores WHERE vehicle_id=?",
-                                     (vid,)).fetchone()
-                    exists = c.execute("SELECT 1 FROM units WHERE vehicle_id=?",
-                                       (vid,)).fetchone()
-                    counts["changed" if exists else "new"] += 1
-                    c.execute(unit_sql, [vid] + [_clean(u.get(k)) for k in data_cols]
-                              + [u["_fingerprint"], sim_time, sim_time, now])
-
+                existing = set(self._lookup("SELECT vehicle_id, 1 FROM units", unit_ids))
+                prev = self._lookup("SELECT vehicle_id, verdict FROM scores", unit_ids)
+                counts["changed"] = len(existing)
+                counts["new"] = len(units) - len(existing)
+                for vid in unit_ids:
                     s = score_by_id[vid]
-                    vals = [vid] + [_clean(s.get(k)) for k in SCORE_COLS] + [
-                        baseline_version, u["_fingerprint"], sim_time, now]
-                    c.execute(score_sql, vals)
-                    c.execute(hist_sql, vals)
-
                     # A new hold: QUARANTINE now, and not already held before
-                    if s["verdict"] == "QUARANTINE" and (prev is None or prev["verdict"] != "QUARANTINE"):
-                        c.execute(
-                            "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
-                            "VALUES (?, ?, 'gate', ?, ?, ?)",
-                            (vid, GATE_EVENT, s.get("reasons") or "QUARANTINE", sim_time, now))
-                        counts["quarantines_raised"] += 1
+                    if s["verdict"] == "QUARANTINE" and prev.get(vid) != "QUARANTINE":
+                        event_vals.append((vid, GATE_EVENT, s.get("reasons") or "QUARANTINE",
+                                           sim_time, now))
+                counts["quarantines_raised"] = len(event_vals)
+                c.executemany(unit_sql, unit_vals)
+                c.executemany(score_sql, score_vals)
+                c.executemany(hist_sql, score_vals)
+                c.executemany(
+                    "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
+                    "VALUES (?, ?, 'gate', ?, ?, ?)", event_vals)
 
                 n_err = len(errors)
                 cur = c.execute(
