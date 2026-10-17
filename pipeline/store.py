@@ -26,11 +26,26 @@ Tables
   units          one row per vehicle, the facts as received + fingerprint
   scores         the current verdict per vehicle
   score_history  every verdict ever given
-  events         QUARANTINE_RAISED (by the gate) and human sign-offs
+  events         gate events (QUARANTINE_RAISED, GATE_RETEST) and human sign-offs
   runs           one row per ingest cycle
   ingest_errors  rows the runner rejected, with the reason
   meta           small key/value state (source cursor, simulated clock)
   baselines      each baseline activation (version, file hash, the one replaced)
+
+Holds
+-----
+A QUARANTINE opens a hold, and only a person closes it, with RELEASED. Release
+needs a name, a note, and passing evidence as the latest retest result since
+the hold opened: either RETEST_PASS (a person re-ran the bench test) or a
+GATE_RETEST that scored PASS (the unit came back through the feed with new
+bench readings). New readings never close a hold on their own.
+
+  While a hold is open, new bench readings are scored and logged as
+  GATE_RETEST (note "PASS", "FLAG: ...", or "QUARANTINE: ...").
+  RETEST_FAIL_REPLACED means a servo was swapped. Nothing more can be
+  recorded until the replacement's readings arrive and are scored.
+  After a release, a QUARANTINE with changed readings opens a new hold.
+  A release stays valid if the readings are unchanged (rework paperwork only).
 """
 
 import datetime as dt
@@ -46,10 +61,80 @@ SCHEMA_VERSION = 1
 
 VERDICTS = ("PASS", "FLAG", "QUARANTINE")
 GATE_EVENT = "QUARANTINE_RAISED"
+GATE_RETEST = "GATE_RETEST"
 HUMAN_EVENTS = ("RETEST_PASS", "RETEST_FAIL_REPLACED", "RELEASED")
-EVENT_TYPES = (GATE_EVENT,) + HUMAN_EVENTS
+EVENT_TYPES = (GATE_EVENT, GATE_RETEST) + HUMAN_EVENTS
 
 SERVOS = ["elevon_l", "elevon_r", "aileron_l", "aileron_r", "rudder"]
+METRICS = ["sweep_current_ma", "peak_current_ma", "sweep_time_ms",
+           "position_error_rms_deg", "backdrive_torque_nmm"]
+READING_COLS = [f"{s}_servo_{m}" for s in SERVOS for m in METRICS]
+
+
+class ActionRefused(ValueError):
+    """A sign-off not allowed in the unit's current state (API: 409)."""
+
+
+def hold_status(events, verdict):
+    """The hold state of one unit from its events (oldest first) and its
+    current verdict. Pure function: the store, health and the API all use it.
+
+    evidence is the latest retest result since the hold opened:
+      "pass"     RETEST_PASS, or a GATE_RETEST that scored PASS
+      "fail"     a GATE_RETEST that scored FLAG or QUARANTINE
+      "pending"  RETEST_FAIL_REPLACED, waiting for the replacement's readings
+      None       nothing yet
+    """
+    hold, closed = None, None
+    for e in events:
+        t = e["event_type"]
+        if t == GATE_EVENT and hold is None:
+            hold = {"held_at": e["at_sim"], "raised_event": e["id"], "reasons": e["note"],
+                    "evidence": None, "gate_retest": None, "last_action": None}
+        elif hold is None:
+            continue
+        elif t == "RELEASED":
+            closed = {"held_at": hold["held_at"], "reasons": hold["reasons"],
+                      "released": {"actor": e["actor"], "note": e["note"],
+                                   "at": e["at_sim"] or e["created_at"]}}
+            hold = None
+        elif t == GATE_RETEST:
+            v = (e["note"] or "").split(":")[0].strip()
+            hold["gate_retest"] = {"verdict": v, "note": e["note"], "at": e["at_sim"]}
+            hold["evidence"] = "pass" if v == "PASS" else "fail"
+        elif t == "RETEST_PASS":
+            hold["evidence"] = "pass"
+        elif t == "RETEST_FAIL_REPLACED":
+            hold["evidence"] = "pending"
+        if hold is not None and t in HUMAN_EVENTS:
+            hold["last_action"] = {"type": t, "actor": e["actor"], "note": e["note"],
+                                   "at": e["at_sim"] or e["created_at"]}
+    if hold is not None:
+        if hold["evidence"] == "pending":
+            allowed = []
+        else:
+            allowed = ["RETEST_PASS", "RETEST_FAIL_REPLACED"]
+            if hold["evidence"] == "pass":
+                allowed.append("RELEASED")
+        return dict(hold, open=True, awaiting_rescore=hold["evidence"] == "pending",
+                    allowed=allowed)
+    pending = bool(events) and events[-1]["event_type"] == "RETEST_FAIL_REPLACED"
+    allowed = ["RETEST_PASS", "RETEST_FAIL_REPLACED"] if verdict == "FLAG" and not pending else []
+    return {"open": False, "awaiting_rescore": pending, "allowed": allowed, "last_hold": closed}
+
+
+def refusal(status, event_type, verdict):
+    """Why event_type is not allowed, in words for the person at the bench."""
+    if status["open"]:
+        if status["awaiting_rescore"]:
+            return "a replaced servo is waiting to be scored; nothing can be recorded until it is"
+        return ("release needs a passing retest since the hold: record RETEST_PASS, "
+                "or wait for new bench readings that score PASS")
+    if status["awaiting_rescore"]:
+        return "a replaced servo is waiting to be scored; nothing can be recorded until it is"
+    if event_type == "RELEASED":
+        return "the unit is not held"
+    return f"retests are recorded for FLAG units or held units; this unit is {verdict}"
 
 # Score columns copied from spc_detector.classify output
 SCORE_COLS = (["verdict", "reasons", "worst_servo", "worst_d", "worst_metric",
@@ -186,15 +271,7 @@ CREATE TABLE score_history (
   scored_sim TEXT,
   scored_at TEXT NOT NULL
 );
-CREATE TABLE events (
-  id INTEGER PRIMARY KEY,
-  vehicle_id TEXT NOT NULL REFERENCES units(vehicle_id),
-  event_type TEXT NOT NULL CHECK (event_type IN ({", ".join(f"'{e}'" for e in EVENT_TYPES)})),
-  actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),
-  note TEXT NOT NULL CHECK (length(trim(note)) > 0),
-  at_sim TEXT,
-  created_at TEXT NOT NULL
-);
+{self._events_ddl()};
 CREATE TABLE runs (
   id INTEGER PRIMARY KEY,
   started_at TEXT NOT NULL,
@@ -233,6 +310,35 @@ COMMIT;""")
         runs_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(runs)")}
         if "duration_ms" not in runs_cols:
             self.conn.execute("ALTER TABLE runs ADD COLUMN duration_ms INTEGER")
+        # SQLite can't alter a CHECK: rebuild events to allow GATE_RETEST
+        ddl = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='events'").fetchone()
+        if ddl and GATE_RETEST not in ddl[0]:
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                c.execute("ALTER TABLE events RENAME TO events_old")
+                c.execute(self._events_ddl())
+                c.execute("INSERT INTO events SELECT * FROM events_old")
+                c.execute("DROP TABLE events_old")
+                c.execute("CREATE INDEX IF NOT EXISTS events_vid ON events(vehicle_id)")
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
+
+    @staticmethod
+    def _events_ddl():
+        types = ", ".join(f"'{e}'" for e in EVENT_TYPES)
+        return f"""CREATE TABLE events (
+  id INTEGER PRIMARY KEY,
+  vehicle_id TEXT NOT NULL REFERENCES units(vehicle_id),
+  event_type TEXT NOT NULL CHECK (event_type IN ({types})),
+  actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),
+  note TEXT NOT NULL CHECK (length(trim(note)) > 0),
+  at_sim TEXT,
+  created_at TEXT NOT NULL
+)"""
 
     @staticmethod
     def _score_col_ddl():
@@ -354,14 +460,27 @@ COMMIT;""")
                 prev = self._lookup("SELECT vehicle_id, verdict FROM scores", unit_ids)
                 counts["changed"] = len(existing)
                 counts["new"] = len(units) - len(existing)
+                changed_ids = [v for v in unit_ids if v in existing]
+                moved = self._readings_changed(changed_ids, {u["vehicle_id"]: u for u in units})
+                status = {v: hold_status(ev, prev.get(v))
+                          for v, ev in self._events_for(changed_ids).items()}
+                held = {v for v, st in status.items() if st["open"]}
+                replaced = {v for v, st in status.items() if not st["open"] and st["awaiting_rescore"]}
+                holds = []
                 for vid in unit_ids:
                     s = score_by_id[vid]
-                    # A new hold: QUARANTINE now, and not already held before
-                    if s["verdict"] == "QUARANTINE" and prev.get(vid) != "QUARANTINE":
+                    verdict = s["verdict"]
+                    if vid in held or (vid in replaced and verdict != "QUARANTINE"):
+                        # New readings are the gate's retest (an open hold stays open)
+                        if vid in moved:
+                            note = verdict if verdict == "PASS" else f"{verdict}: {s.get('reasons') or verdict}"
+                            event_vals.append((vid, GATE_RETEST, note, sim_time, now))
+                    elif verdict == "QUARANTINE" and (prev.get(vid) != "QUARANTINE" or vid in moved):
+                        # A new hold: newly QUARANTINE, or released and its readings changed
                         event_vals.append((vid, GATE_EVENT, s.get("reasons") or "QUARANTINE",
                                            sim_time, now))
-                counts["quarantines_raised"] = len(event_vals)
-                holds = [e[0] for e in event_vals]
+                        holds.append(vid)
+                counts["quarantines_raised"] = len(holds)
                 c.executemany(unit_sql, unit_vals)
                 c.executemany(score_sql, score_vals)
                 c.executemany(hist_sql, score_vals)
@@ -415,10 +534,12 @@ COMMIT;""")
                 if set(fps) != set(ids):
                     raise ValueError("rescore: unknown vehicle_id")
                 prev = self._lookup("SELECT vehicle_id, verdict FROM scores", ids)
+                held = self._open_holds(ids, prev)
                 vals = [[s["vehicle_id"]] + [_clean(s.get(k)) for k in SCORE_COLS]
                         + [baseline_version, fps[s["vehicle_id"]], sim_time, now] for s in scores]
                 holds = [s["vehicle_id"] for s in scores
-                         if s["verdict"] == "QUARANTINE" and prev.get(s["vehicle_id"]) != "QUARANTINE"]
+                         if s["verdict"] == "QUARANTINE" and prev.get(s["vehicle_id"]) != "QUARANTINE"
+                         and s["vehicle_id"] not in held]
                 c.executemany(f"INSERT OR REPLACE INTO scores ({', '.join(names)}) VALUES ({ph})", vals)
                 c.executemany(f"INSERT INTO score_history ({', '.join(names)}) VALUES ({ph})", vals)
                 c.executemany(
@@ -431,6 +552,38 @@ COMMIT;""")
                 c.execute("ROLLBACK")
                 raise
         return holds
+
+    def _readings_changed(self, ids, incoming):
+        """ids (already stored) whose bench readings differ from `incoming`.
+        Called inside the batch transaction, before the units are updated."""
+        cols = [c for c in READING_COLS if c in self.unit_columns]
+        if not ids or not cols:
+            return set()
+        out = set()
+        sel = ", ".join(_ident(c) for c in cols)
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for r in self.conn.execute(f"SELECT vehicle_id, {sel} FROM units WHERE vehicle_id IN "
+                                       f"({','.join('?' * len(chunk))})", chunk):
+                new = incoming[r[0]]
+                if any(r[k + 1] != _clean(new.get(c)) for k, c in enumerate(cols)):
+                    out.add(r[0])
+        return out
+
+    def _events_for(self, ids):
+        """{vehicle_id: [event, ...]} (oldest first) for units with any event."""
+        out = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            for r in self.conn.execute(f"SELECT * FROM events WHERE vehicle_id IN "
+                                       f"({','.join('?' * len(chunk))}) ORDER BY id", chunk):
+                out.setdefault(r["vehicle_id"], []).append(dict(r))
+        return out
+
+    def _open_holds(self, ids, verdicts):
+        """The ids among `ids` with an open hold."""
+        return {v for v, ev in self._events_for(ids).items()
+                if hold_status(ev, verdicts.get(v))["open"]}
 
     def units_needing_rescore(self, baseline_version, limit=5000):
         """Up to `limit` units (source columns) scored under another baseline."""
@@ -490,7 +643,10 @@ COMMIT;""")
                 raise
 
     def add_event(self, vehicle_id, event_type, actor, note, at_sim=None):
-        """Record a human sign-off. Who and why are required."""
+        """Record a human sign-off. Who and why are required, and the action
+        must be allowed in the unit's current state (see Holds above):
+        ActionRefused says why not. The check and the insert are one
+        transaction, so a batch landing in between can't slip past the rules."""
         if self.readonly:
             raise RuntimeError("read-only store")
         if event_type not in HUMAN_EVENTS:
@@ -498,14 +654,41 @@ COMMIT;""")
         if not (actor or "").strip() or not (note or "").strip():
             raise ValueError("actor and note are required")
         with self._lock:
-            if not self.conn.execute("SELECT 1 FROM units WHERE vehicle_id=?",
-                                     (vehicle_id,)).fetchone():
-                raise KeyError(vehicle_id)
-            cur = self.conn.execute(
-                "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (vehicle_id, event_type, actor.strip(), note.strip(), at_sim, utc_now()))
+            c = self.conn
+            c.execute("BEGIN IMMEDIATE")
+            try:
+                r = c.execute("SELECT s.verdict FROM units u LEFT JOIN scores s USING (vehicle_id) "
+                              "WHERE u.vehicle_id=?", (vehicle_id,)).fetchone()
+                if r is None:
+                    raise KeyError(vehicle_id)
+                status = hold_status(self._events_for([vehicle_id]).get(vehicle_id, []), r[0])
+                if event_type not in status["allowed"]:
+                    raise ActionRefused(refusal(status, event_type, r[0]))
+                cur = c.execute(
+                    "INSERT INTO events (vehicle_id, event_type, actor, note, at_sim, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (vehicle_id, event_type, actor.strip(), note.strip(), at_sim, utc_now()))
+                c.execute("COMMIT")
+            except BaseException:
+                c.execute("ROLLBACK")
+                raise
         return cur.lastrowid
+
+    def hold_status(self, vehicle_id):
+        """hold_status() for one unit; None if the unit is unknown."""
+        r = self.conn.execute("SELECT s.verdict FROM units u LEFT JOIN scores s USING (vehicle_id) "
+                              "WHERE u.vehicle_id=?", (vehicle_id,)).fetchone()
+        if r is None:
+            return None
+        return hold_status(self.get_events(vehicle_id), r[0])
+
+    def held_units(self):
+        """{vehicle_id: (events, verdict)} for every unit ever held."""
+        ids = [r[0] for r in self.conn.execute(
+            "SELECT DISTINCT vehicle_id FROM events WHERE event_type=?", (GATE_EVENT,))]
+        ev = self._events_for(ids)
+        verdicts = self._lookup("SELECT vehicle_id, verdict FROM scores", ids)
+        return {v: (ev.get(v, []), verdicts.get(v)) for v in ids}
 
     # ------------------------------------------------------------------- reads
 

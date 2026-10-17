@@ -71,6 +71,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import spc_detector as spc  # noqa: E402
 
+from pipeline import store as store_mod  # noqa: E402
 from pipeline.store import SERVOS, Store  # noqa: E402
 
 DEFAULT_DB = os.path.join(ROOT, "outputs", "live", "production.db")
@@ -351,6 +352,7 @@ class Health:
         self.hb, self.hb_sha = load_health_baseline(baseline_path)  # pinned
         self.rules = self.hb["rules"]
         scoring = spc.load_baseline(scoring_baseline)
+        self.scoring = scoring
         self.scoring_version = scoring["version"]
         self.ceilings = {c: m["ceiling"] for c, m in scoring["measures"].items()
                          if m.get("ceiling") is not None}
@@ -554,8 +556,10 @@ class Health:
         for h in holds:
             if h["open"]:
                 lead = f", {h['lead_hours']:g} h before final QC" if h["lead_hours"] is not None else ""
+                state = ("; replaced servo waiting to be scored" if h["awaiting_rescore"] else
+                         "; passing retest recorded, ready to release" if "RELEASED" in h["allowed"] else "")
                 self._alert(ctx["alerts"], "product", "ALARM", f"hold:{h['vehicle_id']}",
-                            f"{h['vehicle_id']} held at {h['held_at']}{lead}: {h['reasons']}",
+                            f"{h['vehicle_id']} held at {h['held_at']}{lead}: {h['reasons']}{state}",
                             group=h["vehicle_id"], value=h["worst_d"], sim=h["held_at"], now=ctx["now"])
         return {"verdicts": {v: verdicts.get(v, 0) for v in ("QUARANTINE", "FLAG", "PASS")},
                 "units": int(sum(verdicts.values())),
@@ -563,33 +567,42 @@ class Health:
                 "holds": holds}
 
     def _holds(self, ctx):
+        """Every unit ever held: open holds first (worst D first), then
+        released ones. A hold stays open until a person releases it, even if
+        new readings score clean (store.hold_status)."""
         cols = self.store.unit_columns
-        extra = ", ".join(f'u."{c}"' for c in ("final_qc_timestamp_utc", "final_qc_pass",
-                                                "build_date_utc") if c in cols)
-        rows = self.store.conn.execute(
-            f"SELECT s.vehicle_id, s.reasons, s.worst_servo, s.worst_d{', ' + extra if extra else ''} "
-            "FROM scores s JOIN units u USING (vehicle_id) WHERE s.verdict = 'QUARANTINE'").fetchall()
+        held = self.store.held_units()
+        if not held:
+            return []
+        extra = [c for c in ("final_qc_timestamp_utc", "final_qc_pass") if c in cols]
+        ids = list(held)
+        info = {}
+        for i in range(0, len(ids), 900):
+            chunk = ids[i:i + 900]
+            sel = "".join(f', u."{c}"' for c in extra)
+            for r in self.store.conn.execute(
+                    f"SELECT s.vehicle_id, s.worst_servo, s.worst_d{sel} FROM scores s "
+                    f"JOIN units u USING (vehicle_id) WHERE s.vehicle_id IN ({','.join('?' * len(chunk))})",
+                    chunk):
+                info[r[0]] = dict(r)
         holds = []
-        for r in rows:
-            r = dict(r)
-            ev = self.store.get_events(r["vehicle_id"])
-            raised = [e for e in ev if e["event_type"] == "QUARANTINE_RAISED"]
-            held_at = raised[-1]["at_sim"] if raised else None
-            later = [e for e in ev if e["event_type"] != "QUARANTINE_RAISED"
-                     and (not raised or e["id"] > raised[-1]["id"])]
-            last = later[-1] if later else None
+        for vid, (events, verdict) in held.items():
+            st = store_mod.hold_status(events, verdict)
+            h = st if st["open"] else (st["last_hold"] or {})
+            r = info.get(vid, {})
             qc_at = r.get("final_qc_timestamp_utc")
-            lead = hours_between(held_at, qc_at)
-            age = hours_between(held_at, ctx["sim"])
-            holds.append({"vehicle_id": r["vehicle_id"], "held_at": held_at, "final_qc_at": qc_at,
-                          "final_qc_pass": r.get("final_qc_pass"), "reasons": r["reasons"],
-                          "worst_servo": r["worst_servo"], "worst_d": r["worst_d"],
+            lead = hours_between(h.get("held_at"), qc_at)
+            age = hours_between(h.get("held_at"), ctx["sim"]) if st["open"] else None
+            holds.append({"vehicle_id": vid, "open": st["open"], "verdict": verdict,
+                          "held_at": h.get("held_at"), "reasons": h.get("reasons"),
+                          "final_qc_at": qc_at, "final_qc_pass": r.get("final_qc_pass"),
+                          "worst_servo": r.get("worst_servo"), "worst_d": r.get("worst_d"),
                           "lead_hours": round(lead, 2) if lead is not None else None,
                           "age_hours": round(age, 2) if age is not None else None,
-                          "last_action": ({"type": last["event_type"], "actor": last["actor"],
-                                           "note": last["note"], "at": last["at_sim"] or last["created_at"]}
-                                          if last else None),
-                          "open": not (last and last["event_type"] in ("RELEASED", "RETEST_FAIL_REPLACED"))})
+                          "evidence": st.get("evidence"), "gate_retest": st.get("gate_retest"),
+                          "awaiting_rescore": st["awaiting_rescore"], "allowed": st["allowed"],
+                          "last_action": st.get("last_action"),
+                          "released": h.get("released")})
         holds.sort(key=lambda h: (not h["open"], -(h["worst_d"] or 0)))
         return holds
 
@@ -759,6 +772,29 @@ class Health:
                            "pair": [spc.METRICS[i], spc.METRICS[j]]}
             worst = max(worst, abs(r[i, j]))
         return {"units": int(len(M)), "max_abs_r": round(float(worst), 4), "by_servo": by_servo}
+
+    def reading_trend(self, servo, metric):
+        """Daily quartiles of one bench reading, with the scoring baseline's
+        median and FLAG level for reference. From the parts' live rows."""
+        c = spc.col(servo, metric)
+        days = [p["day"].astype(str).to_numpy()[a] for p, a in zip(self._parts, self._alive)]
+        vals = [p[c].to_numpy()[a] for p, a in zip(self._parts, self._alive)]
+        m = self.scoring["measures"][c]
+        out = {"servo": servo, "metric": metric, "baseline_median": m["median"],
+               "flag_level": m["median"] + self.scoring["rules"]["flag_z"] * m["sigma"],
+               "quarantine_level": m["median"] + self.scoring["rules"]["quarantine_z"] * m["sigma"],
+               "ceiling": m.get("ceiling"), "days": []}
+        if not days:
+            return out
+        df = pd.DataFrame({"day": np.concatenate(days), "v": np.concatenate(vals).astype(np.float64)})
+        df = df[df["day"] != UNKNOWN]
+        g = df.groupby("day")["v"]
+        q = g.quantile([0.25, 0.5, 0.75]).unstack()
+        n = g.count()
+        out["days"] = [{"day": d, "n": int(n[d]), "q1": round(float(q.loc[d, 0.25]), 4),
+                        "median": round(float(q.loc[d, 0.5]), 4), "q3": round(float(q.loc[d, 0.75]), 4)}
+                       for d in q.index]
+        return out
 
     def _gate(self, ctx, meta):
         al, now, sim, rules = ctx["alerts"], ctx["now"], ctx["sim"], self.rules

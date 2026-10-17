@@ -2,7 +2,7 @@
 
 How the live production health dashboard will be built, step by step: what each piece does, how it works, why it is built that way, and which problem from the investigation it addresses. Requirements and architecture are in [`LIVE_SYSTEM_DESIGN.md`](LIVE_SYSTEM_DESIGN.md); this document is the build plan.
 
-Status: **Steps 0–4 built and tested**; Steps 5–8 planned.
+Status: **Steps 0–5 built and tested**; Steps 6–8 planned.
 
 ---
 
@@ -155,7 +155,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
 
   | Layer | Calculation | Alert |
   |:--|:--|:--|
-  | 1. Product risk | Verdict counts; hold queue with each unit's held time, final-QC time, lead time and age (build hours); saturated units; latest human action per hold | Each open hold: ALARM (closed by RELEASED or RETEST_FAIL_REPLACED) |
+  | 1. Product risk | Verdict counts; hold queue with each unit's held time, final-QC time, lead time and age (build hours); saturated units; latest human action per hold | Each open hold: ALARM until a person releases it (Step 5 release rules) |
   | 2. Process stability | Daily FLAG-rate p-charts for the fleet and each plant, line (plant + line: LN1–LN3 exist at both plants), shift and QC station (vehicle verdict), and for each servo's lots, vendors and models (that servo's own flag); fleet hourly series for display | Point at or above its exact upper limit: ALARM. 8+ days in a row above the centre line: WATCH. At or below the exact lower limit: WATCH ("unusually clean: check the gate"). Only signals on the last 2 build days drive status; older ones stay marked on the chart |
   | 3. Quality-system integrity | Final-QC pass share beside the gate's verdicts (a QC × verdict table); holds placed before final QC; open warnings (QC exception, IMU / magnetometer calibration WARN, strain relief failed) by type, line and QC station | QC passing ≥ 99.9% while the gate holds or flags units: INFO |
   | 4. Throughput and rework | Units per build hour by line; per day by plant, line and shift; rework share by line and units by code (`|` or `;` separated) | A line building under 50% of its normal hourly units in each of the gate's last 2 build hours: WATCH (one slow hour is normal variation) |
@@ -180,42 +180,66 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   - **drifting lot:** 55 units of aileron_l lot L2026-03B made FLAG from 02-15 (about 3× its normal rate), applied as changed units through the store so the incremental path runs on 200,000 units: first ALARM on 02-15, the lot's later days above or in a run, no other aileron_l lot changed. (One seeded run; by simulation a 3× lot drift alarms in a median of 3 days, 90th percentile 8.)
 - **Measured:** first load of 200,000 units 7.3 s (reading 4.7 s, preparing 23 text columns 2.9 s; once per start). Per batch at 200,000 units: update median 96 ms, max 127 ms for 300 reworked units (each subtracted and re-added); snapshot 50–60 ms (it was 525 ms before counts were indexed by chart and units kept in parts). Live, with factory, gate and health as separate processes: stopping the factory raised `feed_silent` 12 s later (3 s threshold plus the 10 s heartbeat), stopping the gate raised `heartbeat` at 31 s, catch-up showed `lag` WATCH until it reached 0, and the finished replay showed `feed_finished` INFO with totals 2 / 6,498 / 193,500.
 
-### Step 5: API and live push, `dashboard/app.py`
+### Step 5: API, live push and release workflow, `dashboard/app.py` (done)
 
-- **What:** a FastAPI service that starts the runner and serves each view's data.
+- **What:** one gate process (FastAPI, served by uvicorn) that runs the runner, keeps a health snapshot current, serves each view's data, pushes a server-sent event on every change, and enforces the hold and release rules. The factory simulator stays a separate process; the two share only the feed.
 - **How:**
-  - **Startup hook (lifespan):** opens the store and starts the runner as a background task, so scoring runs from server start whether or not anyone is watching.
-  - **Endpoints** (all read-only except one):
+
+  | Part | Role | Why |
+  |:--|:--|:--|
+  | Runner thread | Polls the feed and scores, exactly as Step 3; starts with the server (lifespan hook) | Detection runs whether or not anyone has the page open |
+  | Health worker (one thread) | After every batch, and at least once a second, `refresh()` then `snapshot()`; saves the result | `Health` isn't thread-safe, so one thread owns it. The once-a-second round shows a silent feed or a dead runner even when no batch arrives |
+  | Request handlers | Read the saved snapshot; only a unit record, the retest list and a reading trend touch the database or the in-memory units | 50 open screens cost what one does |
+
+  Each part has its own SQLite connection (WAL): the runner writes batches, the API writes sign-offs, health and requests read.
+
+  - **Endpoints:**
 
     | Endpoint | Serves | Team |
     |:--|:--|:--|
-    | `GET /api/summary` | counts by verdict, QC-reported pass share, units / hour, simulated time, freshness | All (header) |
-    | `GET /api/quarantine` | blocked units: reasons, worst servo, D, age, line, shift | Production |
-    | `GET /api/throughput?by=` | units and rework per hour / day by line, shift or plant | Production |
-    | `GET /api/charts/pchart?by=` | FLAG rate, n, limits and out-of-control marks per group | Quality |
-    | `GET /api/charts/trend?servo=&metric=` | daily median and quartiles of a bench reading | Quality |
-    | `GET /api/warnings` | open warnings by type, line and station | Quality |
-    | `GET /api/ceilings` | share of readings at each instrument ceiling | Quality |
-    | `GET /api/retest` | FLAG units ranked by D | Engineering |
-    | `GET /api/units/{id}` | full record, verdict, reasons, 5×5 z grid, D, history, events | Engineering |
-    | `POST /api/units/{id}/events` | record a retest result or a release (name and note required) | Engineering |
-    | `GET /api/health` | freshness, ingest errors, assumption check, baseline version | All |
-    | `GET /api/stream` | server-sent event on every new batch | All |
+    | `GET /api/status` | loading / ready, runner state, both baselines (version and SHA-256), timings; answers before the first snapshot | All |
+    | `GET /api/summary` | status and layer colours, alert counts, verdicts, open holds, QC-reported pass share, freshness | Header |
+    | `GET /api/alerts?layer=&severity=` | the alert list | All |
+    | `GET /api/quarantine?open=true\|false\|all` | holds: held time, lead before final QC, age, current verdict, latest gate retest, evidence, allowed actions, last action, who released | Production |
+    | `GET /api/throughput?by=line\|shift\|plant&period=hour\|day&last=` | units per hour (by line) or day, normal rates, rework by code and line | Production |
+    | `GET /api/charts/pchart?by=&group=` | daily points, exact limits and signals for one group type (fleet, plant, line, shift, QC station, or a servo's lot / vendor / model) | Quality |
+    | `GET /api/charts/trend?servo=&metric=` | daily quartiles of one bench reading, with the baseline median, FLAG and QUARANTINE levels and the ceiling; cached until the next batch | Quality |
+    | `GET /api/warnings`, `GET /api/ceilings` | open warnings by type, line and station; share of readings at each ceiling | Quality |
+    | `GET /api/retest?limit=` | FLAG units ranked by D, with allowed actions | Engineering |
+    | `GET /api/units/{id}` | full record, score, 5×5 z grid (recomputed from the readings with the pinned scoring baseline, since the store keeps only D and the worst z), D per servo, score history, events, hold state | Engineering |
+    | `POST /api/units/{id}/events` | records `RETEST_PASS`, `RETEST_FAIL_REPLACED` or `RELEASED`: 422 if a field is missing or blank, 404 for an unknown unit, 409 with the reason if not allowed | Engineering |
+    | `GET /api/health` | the gate layer: freshness, lag, latency, ingest errors, correlation, baselines | All |
+    | `GET /api/stream` | server-sent events (below) | All |
 
-  - **Release rules:** a quarantined unit stays blocked until a `RELEASED` event with a name and note is recorded. `RETEST_FAIL_REPLACED` keeps it blocked until the replacement servo is scored.
+  - **Start-up:** the first snapshot loads every stored unit (7.3 s for the full month). Until it's ready `/api/status` says `loading` and the snapshot endpoints return 503 with `Retry-After: 2`. Before any units exist the views return empty lists, not errors.
+  - **Live push:** one small event per change (new units, an alert raised or cleared, a status change) with the snapshot number, simulated time, layer colours, alert counts and the ids of alerts added and cleared; the page refetches only its open tab. A keep-alive comment every 15 s and `retry: 3000`. Each client keeps only the newest event, so a slow screen skips ahead. Server-sent events rather than WebSockets: one-way, the browser reconnects by itself, plain HTTP, no extra library.
+  - **Stopping:** a live stream never ends by itself, so a plain server waits forever for open screens on SIGTERM (found in the live run). On a stop signal the gate ends every stream first; a 3 s grace limit is the backstop. Then the lifespan shutdown stops the runner between batches.
+- **Release rules** (approved; in `pipeline/store.py`, so the API and any future caller obey the same rules):
+  - A QUARANTINE opens a hold, and **only a person closes it**, with `RELEASED`. New bench readings never close a hold on their own (before this step, a republished unit that scored PASS silently dropped off the queue).
+  - `RELEASED` needs a name, a note and passing evidence as the latest retest result since the hold opened: a `RETEST_PASS` (a person re-ran the bench test), or a **gate retest** that scored PASS.
+  - **Gate retest:** when a held unit comes back through the feed with changed bench readings, the gate scores them and logs `GATE_RETEST` with the verdict. PASS makes the hold releasable; FLAG or QUARANTINE is failing evidence and cancels an earlier `RETEST_PASS`. Rework that changes only paperwork (same readings) logs nothing.
+  - `RETEST_FAIL_REPLACED` (servo swapped) blocks every action until the replacement's readings arrive and are scored. Before this step it closed the hold, so a replacement that still scored QUARANTINE was shown as cleared (reproduced, then fixed).
+  - After a release, a QUARANTINE with changed readings opens a new hold.
+  - FLAG units can record retests and replacements; `RELEASED` is refused because nothing is held. PASS units: nothing to record.
+  - The check and the insert run in one transaction, so a batch landing in between can't slip past the rules. Older databases are migrated (the events table is rebuilt to allow `GATE_RETEST`).
 - **Why:**
-  - Each view gets exactly what it needs, so the browser does no analysis.
-  - The same API can be called by other systems: a bench station could ask "is this unit cleared?" before installing a servo.
-  - Server-sent events push an update the moment a batch lands, so a new hold appears on every screen without a refresh.
-  - The release rules make the engineer sign-off from REPORT §6.2 enforceable and traceable (I15).
+  - Each view gets exactly what it needs, so the browser does no analysis, and other systems can call the same API (a bench station could ask whether a unit is cleared before installing a servo).
+  - A push the moment a batch lands means a new hold appears on every screen without a refresh.
+  - The release rules make the engineer sign-off from REPORT §6.2 enforceable and traceable (I15). A release without a passing retest is impossible, and missing a required re-check is how GLDR-0421 got through.
 - **Problems addressed:** I1, I8, I9, I15, plus the README's "operate continuously".
-- **Check (API tests on a replayed database):**
-  - both known defects are in `/api/quarantine`;
-  - `/api/units/GLDR-0421` returns D = 8.57 and the left aileron row of the z grid;
-  - a release without a note is refused;
-  - a valid release is logged and the unit leaves the queue;
-  - unknown IDs return 404;
-  - `/api/stream` emits an event after a batch.
+- **Command line:** `python3 -m dashboard.app [--feed …] [--db …] [--port 8000] [--no-runner]`.
+- **Checks, all passing:** `tests/test_app.py` (11 tests), seven new hold tests in `tests/test_store.py` (22 in all), one in `tests/test_health.py` (28 in all):
+  - on a replayed database of two real build days (14,308 units): both known defects held at 02-06 03:00 and 02-18 07:00, 1 h before final QC, each an ALARM; `/api/units/GLDR-0421` gives D = 8.57 with only the left aileron row at QUARANTINE level; counts equal the store and `classify()`;
+  - sign-offs: blank or missing note 422, unknown type 422, unknown unit 404, release without retest 409 with the reason, retest pass then release 201; the hold leaves the open queue and its alert clears on the next snapshot; a second release 409;
+  - replaced servo still bad: stays held, gate retest QUARANTINE, ALARM stays; clean readings: still held, "ready to release", release allowed; later failing evidence cancels a retest pass; a released unit with new bad readings is held again, but not after a paperwork-only republish; old events table migrated;
+  - start-up: `/api/status` answers while loading, snapshot endpoints 503 with `Retry-After`; no database: empty views and a red gate layer;
+  - on a real socket: a batch released → event received in 130–144 ms over four runs; a stop signal with a screen connected stops the server in 0.1–0.2 s;
+  - breaking the release rule on purpose (release always allowed) fails 4 tests; removing the stop handling fails the shutdown test.
+- **Measured, live** (factory and gate as separate processes, whole month at 0.5 s per build hour, 4× the demo speed, with 11 endpoints polled every second):
+  - 2 / 6,498 / 193,500; both holds on screen by the next build hour, with lead 1.0 h; a release without retest refused (409), retest then release accepted, and the hold left the queue with one stream event;
+  - endpoint median 9–27 ms (p95 31–119 ms) except the reading trend, median 61 ms (p95 309 ms), which groups 200,000 readings after each batch; 674 stream events for 672 batches;
+  - largest gap between batch events 1.78 s; the only longer gap (5.2 s) is start-up, while the factory loads the CSV;
+  - batches took 262 ms on average in the shared process (167 ms standalone in Step 3), so at 0.5 s per hour the `latency` WATCH (p95 over half the cadence) fired, as designed. At the demo's 2 s cadence the limit is 1 s.
 
 ### Step 6: Frontend, `dashboard/static/`
 
@@ -281,5 +305,6 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
 - **User accounts and permissions:** the release form records a name but doesn't authenticate it. Production would add login and role-based release rights (for example, quality engineers only).
 - **Blocking on open warnings:** shown, not blocked, because the data doesn't link them to failures (REPORT §6).
 - **Alert delivery** (email, Slack, pager): the health endpoint is designed for an alerting tool to poll; wiring one up is a deployment step.
+- **Throughput alert in CSV mode:** the throughput WATCH is validated on the factory feed only. The CSV watcher has no factory clock, so it uses the current wall time, which never matches a build hour in the file, and the check stays silent (verified: a line building 5 units an hour for 2 hours raised nothing in CSV mode and a WATCH when checked at its build hour). The CSV watcher is still tested as an ingest path. For a plant that sends live CSV exports, the fix is to check the two most recent completed build hours, never the one still being built.
 - **Postgres and multi-plant deployment:** the schema is written to move; the demo uses SQLite.
 - **CUSUM charts (future improvement):** a binomial CUSUM would catch small supplier drifts faster. Simulated for one lot of about 330 units a day at the same false-alarm rate as the p-charts (about one false signal per 860–940 days per group, decision interval h = 5), it detects a 2× drift in a median of 6 days (90th percentile 11), against 10 days (90th percentile 24) for the p-chart. It reaches 3–4 days only at 5–13× more false alarms (h = 2.5–3.5). Left out so the charts stay readable for operators, and because the per-unit gate already contains each bad unit during a slow drift.

@@ -217,11 +217,35 @@ class ProductAndQualityTest(SyntheticBase):
         info = self.alerts(snap, "quality")
         self.assertEqual([a["severity"] for a in info], ["INFO"])  # QC passed 100%, gate held 1
         self.assertIn("Final QC passed 100.0%", info[0]["message"])
-        self.store.add_event("V005000", "RELEASED", "J. Doe", "bench retest 3x clean")
+        self.store.add_event("V005000", "RETEST_PASS", "J. Doe", "bench retest 3x clean")
         snap = self.h.snapshot(now=NOW)
-        self.assertFalse(snap["product"]["holds"][0]["open"])
+        self.assertIn("ready to release", self.alerts(snap, "product")[0]["message"])
+        self.store.add_event("V005000", "RELEASED", "J. Doe", "released after retest")
+        snap = self.h.snapshot(now=NOW)
+        hold = snap["product"]["holds"][0]
+        self.assertEqual((hold["open"], hold["held_at"], hold["released"]["actor"]),
+                         (False, "2026-02-01T01:00:00", "J. Doe"))
         self.assertEqual(self.alerts(snap, "product"), [])
         self.assertEqual(snap["layers"]["product"], "green")
+
+    def test_hold_stays_open_until_released_even_when_readings_clean(self):
+        unit = make_units(1, "2026-02-01T01:00:00", self.rng, start=5000)
+        clean = unit.copy()
+        for m in spc.METRICS:
+            c = spc.col("aileron_l", m)
+            unit[c] = SCORING["measures"][c]["median"] + 4 * SCORING["measures"][c]["sigma"]
+        write(self.store, unit, "2026-02-01T01:00:00")
+        self.store.add_event("V005000", "RETEST_FAIL_REPLACED", "J. Doe", "servo replaced")
+        self.healthy_meta(sim_time="2026-02-01T02:00:00", feed_clock="2026-02-01T02:00:00")
+        msg = self.alerts(self.h.snapshot(now=NOW), "product")[0]["message"]
+        self.assertIn("replaced servo waiting to be scored", msg)
+        # The replacement comes back clean: still held, and now releasable
+        write(self.store, clean, "2026-02-01T02:00:00")
+        snap = self.h.snapshot(now=NOW)
+        hold = snap["product"]["holds"][0]
+        self.assertEqual((hold["open"], hold["verdict"], hold["gate_retest"]["verdict"], hold["allowed"]),
+                         (True, "PASS", "PASS", ["RETEST_PASS", "RETEST_FAIL_REPLACED", "RELEASED"]))
+        self.assertEqual([a["severity"] for a in self.alerts(snap, "product")], ["ALARM"])
 
     def test_open_warnings_by_type(self):
         w = make_units(4, "2026-02-01T01:00:00", self.rng, start=6000, qc_station_id="QC-2")

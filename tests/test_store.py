@@ -92,9 +92,14 @@ class StoreTest(unittest.TestCase):
         ev = self.db.get_events("A")
         self.assertEqual([(e["event_type"], e["actor"], e["at_sim"]) for e in ev],
                          [("QUARANTINE_RAISED", "gate", "2026-02-06T03:00:00Z")])
-        # Re-scored while still held: no second hold event
-        self.ingest([unit("A", current=500.0)], verdicts=q)
+        # Rework paperwork only (same readings) while held: no event at all
+        self.ingest([unit("A", rework=1)], verdicts=q)
         self.assertEqual(len(self.db.get_events("A")), 1)
+        # New readings while held: logged as the gate's retest, no second hold
+        self.ingest([unit("A", current=500.0, rework=1)], verdicts=q)
+        self.assertEqual([(e["event_type"], e["note"]) for e in self.db.get_events("A")],
+                         [("QUARANTINE_RAISED", "SIGNATURE aileron_l D=7.0"),
+                          ("GATE_RETEST", "QUARANTINE: SIGNATURE aileron_l D=7.0")])
 
     def test_failed_batch_writes_nothing(self):
         rows = self.db.diff([unit("A"), unit("B")])["new"]
@@ -116,7 +121,7 @@ class StoreTest(unittest.TestCase):
             self.db.write_batch(rows, [score("A")], baseline_version="v1")
 
     def test_human_event_requires_who_and_why(self):
-        self.ingest([unit("A")])
+        self.ingest([unit("A")], verdicts={"A": ("FLAG", "HIGH aileron_l.sweep_current_ma z=3.2")})
         with self.assertRaises(ValueError):
             self.db.add_event("A", "RELEASED", "", "ok")
         with self.assertRaises(ValueError):
@@ -132,6 +137,110 @@ class StoreTest(unittest.TestCase):
                          ("RETEST_PASS", "J. Doe", "bench retest 3x, D < 2",
                           "2026-02-06T05:00:00Z"))
         self.assertTrue(e["created_at"])
+
+    # ---- holds: only a person's release closes one
+
+    def hold(self, vid="A"):
+        return self.db.hold_status(vid)
+
+    def held(self, vid="A", current=300.0, rework=0, verdict="QUARANTINE", sim="2026-02-06T03:00:00Z"):
+        reason = {"QUARANTINE": "SIGNATURE aileron_l D=7.0", "FLAG": "ELEVATED aileron_l D=4.6",
+                  "PASS": ""}[verdict]
+        return self.ingest([unit(vid, current=current, rework=rework)],
+                           verdicts={vid: (verdict, reason)}, sim=sim)
+
+    def test_release_needs_a_passing_retest(self):
+        self.held()
+        self.assertEqual(self.hold()["allowed"], ["RETEST_PASS", "RETEST_FAIL_REPLACED"])
+        with self.assertRaises(st.ActionRefused) as cm:
+            self.db.add_event("A", "RELEASED", "J. Doe", "looks fine")
+        self.assertIn("passing retest", str(cm.exception))
+        self.db.add_event("A", "RETEST_PASS", "J. Doe", "bench retest 3x clean")
+        self.assertIn("RELEASED", self.hold()["allowed"])
+        self.db.add_event("A", "RELEASED", "J. Doe", "released after retest")
+        h = self.hold()
+        self.assertFalse(h["open"])
+        self.assertEqual((h["last_hold"]["held_at"], h["last_hold"]["released"]["actor"]),
+                         ("2026-02-06T03:00:00Z", "J. Doe"))
+        with self.assertRaises(st.ActionRefused):
+            self.db.add_event("A", "RELEASED", "J. Doe", "twice")  # not held any more
+        self.assertEqual(self.db.table_count("events"), 3)
+
+    def test_new_clean_readings_do_not_close_a_hold(self):
+        self.held()
+        r = self.held(current=301.0, verdict="PASS", sim="2026-02-06T05:00:00Z")
+        self.assertEqual(r["quarantines_raised"], 0)
+        h = self.hold()
+        self.assertTrue(h["open"])
+        self.assertEqual((h["gate_retest"]["verdict"], h["gate_retest"]["at"], h["evidence"]),
+                         ("PASS", "2026-02-06T05:00:00Z", "pass"))
+        self.db.add_event("A", "RELEASED", "J. Doe", "gate retest clean")  # allowed now
+        self.assertFalse(self.hold()["open"])
+
+    def test_later_failing_evidence_cancels_a_retest_pass(self):
+        self.held()
+        self.db.add_event("A", "RETEST_PASS", "J. Doe", "bench retest clean")
+        self.held(current=310.0, verdict="FLAG")  # newer readings are not clean
+        h = self.hold()
+        self.assertEqual((h["evidence"], "RELEASED" in h["allowed"]), ("fail", False))
+        with self.assertRaises(st.ActionRefused):
+            self.db.add_event("A", "RELEASED", "J. Doe", "old retest")
+
+    def test_replaced_servo_still_bad_stays_held(self):
+        self.held()
+        self.db.add_event("A", "RETEST_FAIL_REPLACED", "J. Doe", "servo swapped")
+        h = self.hold()
+        self.assertEqual((h["open"], h["awaiting_rescore"], h["allowed"]), (True, True, []))
+        with self.assertRaises(st.ActionRefused) as cm:
+            self.db.add_event("A", "RETEST_PASS", "J. Doe", "too early")
+        self.assertIn("waiting to be scored", str(cm.exception))
+        self.held(current=520.0)  # the replacement is also bad
+        h = self.hold()
+        self.assertEqual((h["open"], h["awaiting_rescore"], h["evidence"]), (True, False, "fail"))
+        self.assertEqual(h["gate_retest"]["verdict"], "QUARANTINE")
+
+    def test_released_unit_with_new_bad_readings_is_held_again(self):
+        self.held()
+        self.db.add_event("A", "RETEST_PASS", "J. Doe", "bench retest clean")
+        self.db.add_event("A", "RELEASED", "J. Doe", "released")
+        r = self.held(rework=1)  # paperwork only: the release stands
+        self.assertEqual((r["quarantines_raised"], self.hold()["open"]), (0, False))
+        r = self.held(current=530.0, rework=2, sim="2026-02-08T00:00:00Z")
+        self.assertEqual(r["holds"], ["A"])
+        h = self.hold()
+        self.assertEqual((h["open"], h["held_at"], h["evidence"]), (True, "2026-02-08T00:00:00Z", None))
+
+    def test_flag_unit_retests_and_replacement(self):
+        self.held(verdict="FLAG")
+        self.assertEqual(self.hold()["allowed"], ["RETEST_PASS", "RETEST_FAIL_REPLACED"])
+        with self.assertRaises(st.ActionRefused):
+            self.db.add_event("A", "RELEASED", "J. Doe", "nothing held")
+        self.db.add_event("A", "RETEST_FAIL_REPLACED", "J. Doe", "servo swapped")
+        self.assertEqual(self.hold()["allowed"], [])
+        self.held(current=299.0, verdict="PASS")
+        h = self.hold()
+        self.assertEqual((h["open"], h["awaiting_rescore"], h["allowed"], h["last_hold"]),
+                         (False, False, [], None))
+        self.assertEqual(self.db.get_events("A")[-1]["note"], "PASS")
+        # A PASS unit: nothing to record
+        with self.assertRaises(st.ActionRefused):
+            self.db.add_event("A", "RETEST_PASS", "J. Doe", "not needed")
+
+    def test_old_events_table_is_migrated(self):
+        self.held()
+        self.db.close()
+        import sqlite3
+        c = sqlite3.connect(self.path)
+        c.executescript("""ALTER TABLE events RENAME TO e2;
+CREATE TABLE events (id INTEGER PRIMARY KEY, vehicle_id TEXT NOT NULL REFERENCES units(vehicle_id),
+  event_type TEXT NOT NULL CHECK (event_type IN ('QUARANTINE_RAISED','RETEST_PASS','RETEST_FAIL_REPLACED','RELEASED')),
+  actor TEXT NOT NULL, note TEXT NOT NULL, at_sim TEXT, created_at TEXT NOT NULL);
+INSERT INTO events SELECT * FROM e2; DROP TABLE e2;""")
+        c.close()
+        self.db = st.Store(self.path)
+        self.assertEqual(self.db.table_count("events"), 1)
+        self.held(current=301.0, verdict="PASS")  # writes a GATE_RETEST: allowed after migration
+        self.assertEqual(self.db.get_events("A")[-1]["event_type"], "GATE_RETEST")
 
     def test_run_errors_and_meta_recorded(self):
         rows = self.db.diff([unit("A")])["new"]

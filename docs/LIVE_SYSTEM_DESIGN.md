@@ -213,7 +213,7 @@ Alternatives considered. The system has two jobs: **ingest** (pull, score and st
 | 2 | `pipeline/source.py` + `tools/factory_simulator.py`: feed and adapters | Full month through the feed yields 200,000 unique units in build order (done) |
 | 3 | `pipeline/runner.py`: ingest → score → store | After full replay, DB counts = 2 / 6,498 / 193,500 (golden test); GLDR-0421 raised at 02-06 03:00 |
 | 4 | `pipeline/health.py`: p-charts (exact binomial limits), freshness, correlation, ceilings (done) | FLAG rate 3.25%; every plant, line, shift and QC-station chart in control; 2 ALARM points and 3 WATCH runs on the stable month; max \|r\| 0.0059; 1,028 saturated |
-| 5 | `dashboard/app.py`: API + SSE | Endpoint tests on the replayed DB |
+| 5 | `dashboard/app.py`: API + SSE + release rules (done) | Endpoint and sign-off tests on a replayed DB; live month 2 / 6,498 / 193,500; batch → event in ~140 ms |
 | 6 | `dashboard/static/`: three team views + health strip | Each team's question in §1.4 answered in one view |
 | 7 | REPORT §7 and run instructions | One command starts replay, API and dashboard |
 
