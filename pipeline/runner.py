@@ -159,6 +159,9 @@ class Runner:
         self._last_logged_problem = None
         self._warned_extra = set()
         self._warned_disk_sha = None
+        self._feed = None               # factory's last reported state
+        self._feed_seen_clock = None    # feed clock at the last observed advance
+        self._feed_advanced_at = None   # self._clock() reading at that advance
         if os.path.exists(db_path):
             self._open_store()
 
@@ -175,6 +178,7 @@ class Runner:
             log.warning("%d stored units were scored under another baseline; "
                         "run with --rescore to re-score them under %s", other, self.base["version"])
         self.cursor = self.store.get_meta("cursor")
+        self._last_heartbeat = 0.0  # next heartbeat writes at once: health sees the gate alive
 
     def _create_store(self, frame):
         cols = None
@@ -218,6 +222,22 @@ class Runner:
             if self.store:
                 self.store.set_meta({"runner_status": self.status})
 
+    def observe_feed(self):
+        """Note the factory's clock on every poll. Silence is measured on the
+        gate's monotonic clock from the last time that clock advanced, so it
+        doesn't depend on the factory's and the gate's wall clocks agreeing."""
+        if not hasattr(self.source, "feed_status"):
+            return None
+        st = self.source.feed_status()
+        now = self._clock()
+        if self._feed_advanced_at is None or (st and st["clock"] != self._feed_seen_clock):
+            self._feed_seen_clock = st["clock"] if st else None
+            self._feed_advanced_at = now
+        self._feed = dict(st or {"clock": None, "cadence_s": None, "state": "absent",
+                                 "published_at": None},
+                          silent_s=round(now - self._feed_advanced_at, 3))
+        return self._feed
+
     def heartbeat(self, feed_clock=None, force=False):
         now = time.monotonic()
         if not force and now - self._last_heartbeat < self.heartbeat_s:
@@ -227,6 +247,10 @@ class Runner:
         if self.store:
             values = {"last_poll_at": utc_now(), "runner_status": self.status,
                       "baseline": self.baseline_status}
+            if self._feed is not None:
+                # silent_s is as of checked_at; health reads both together
+                values["feed"] = dict(self._feed, checked_at=values["last_poll_at"])
+                feed_clock = self._feed["clock"] or feed_clock
             if feed_clock:
                 values["feed_clock"] = feed_clock
             self.store.set_meta(values)
@@ -259,6 +283,7 @@ class Runner:
         """Process one batch. Returns rows read (0 when idle)."""
         started, started_mono = utc_now(), self._clock()
         feed_id = self._check_feed_identity()
+        self.observe_feed()
         batch = self.source.fetch_new(self.cursor)
         if not len(batch):
             self._set_status("IDLE")
@@ -290,7 +315,8 @@ class Runner:
             unchanged=d["unchanged"], rows_read=len(batch.frame), errors=errors,
             rejected=rejected, started_at=started, started_mono=started_mono, mono=self._clock,
             meta={"cursor": batch.cursor, "sim_time": batch.sim_time, "feed_id": feed_id,
-                  "feed_clock": batch.sim_time, "last_batch_at": utc_now()})
+                  "feed_clock": (self._feed or {}).get("clock") or batch.sim_time,
+                  "last_batch_at": utc_now()})
         self.cursor = batch.cursor
         self._failures = 0
         self._last_logged_problem = None

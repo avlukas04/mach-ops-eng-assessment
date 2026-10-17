@@ -219,6 +219,21 @@ class MesSource:
             return None
         return r[0] if r else None
 
+    def feed_status(self):
+        """The factory's own state: clock, cadence (s per build hour, None if
+        unpaced), running / finished, last publish time. None if no feed yet."""
+        conn = self._connect()
+        if conn is None:
+            return None
+        try:
+            meta = dict(conn.execute("SELECT key, value FROM feed_meta").fetchall())
+        except sqlite3.OperationalError:
+            return None
+        cadence = meta.get("cadence_s")
+        return {"clock": meta.get("sim_time"),
+                "cadence_s": float(cadence) if cadence not in (None, "") else None,
+                "state": meta.get("state"), "published_at": meta.get("published_at")}
+
     def fetch_new(self, cursor=0):
         cursor = cursor or 0
         conn = self._connect()

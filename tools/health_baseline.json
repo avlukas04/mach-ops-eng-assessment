@@ -1,0 +1,45 @@
+{
+  "version": "2026-10-16",
+  "description": "Frozen expected rates for health alarms. Review before changing.",
+  "reference": {
+    "source_file": "manufacturing.csv",
+    "source_sha256": "9d6b8698ec562dd3d7d5c51dae3c46009d85679963ae5bb524e56d5e63b1acde",
+    "units": 200000,
+    "build_hours": 672,
+    "scoring_baseline_version": "2026-10-13"
+  },
+  "rates": {
+    "vehicle_flag": 0.0325,
+    "servo_flag": {
+      "elevon_l": 0.00622,
+      "elevon_r": 0.006565,
+      "aileron_l": 0.006945,
+      "aileron_r": 0.00677,
+      "rudder": 0.006485
+    }
+  },
+  "throughput": {
+    "line_units_per_hour_median": {
+      "HB-PLANT-1/LN1": 50.0,
+      "HB-PLANT-1/LN2": 49.0,
+      "HB-PLANT-1/LN3": 49.5,
+      "OC-PLANT-2/LN1": 50.0,
+      "OC-PLANT-2/LN2": 50.0,
+      "OC-PLANT-2/LN3": 49.0
+    }
+  },
+  "rules": {
+    "alpha": 0.00135,
+    "run_length": 8,
+    "chart_active_days": 2,
+    "heartbeat_stale_s": 30,
+    "feed_stale_cadences": 3,
+    "lag_watch_hours": 3,
+    "latency_watch_share": 0.5,
+    "latency_window_runs": 24,
+    "corr_window": 20000,
+    "corr_min_units": 2000,
+    "corr_alarm": 0.1,
+    "throughput_watch_share": 0.5
+  }
+}

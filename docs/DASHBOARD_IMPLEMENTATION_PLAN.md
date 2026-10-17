@@ -2,7 +2,7 @@
 
 How the live production health dashboard will be built, step by step: what each piece does, how it works, why it is built that way, and which problem from the investigation it addresses. Requirements and architecture are in [`LIVE_SYSTEM_DESIGN.md`](LIVE_SYSTEM_DESIGN.md); this document is the build plan.
 
-Status: **plan for review**. Nothing below is built yet.
+Status: **Steps 0–4 built and tested**; Steps 5–8 planned.
 
 ---
 
@@ -130,7 +130,7 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   3. **Score** with `spc_detector.classify` and the baseline pinned at start.
   4. **Store** in one transaction: units, scores, history, new holds, errors, run log, cursor.
   5. **Report** to listeners (Step 4 health and Step 5 live push plug in here). The command line prints each hold with its lead time before final QC and QC's own result.
-  6. **Heartbeat** about every 10 s: `last_poll_at`, the feed's clock, runner status and baseline status in `meta`. Empty polls are not logged as runs.
+  6. **Heartbeat** about every 10 s: `last_poll_at`, the feed's clock and status (with silence measured on the gate's monotonic clock, added in Step 4), runner status and baseline status in `meta`. Empty polls are not logged as runs.
   7. **Failures** retry the same cursor with backoff (1, 2, 4 … 30 s). A batch is never skipped; a broken listener never stops the gate.
 - **Baseline control (approved decision: pin, warn, promote by restart):**
   - *Pin:* loaded once at start; version and SHA-256 recorded; every score carries the version.
@@ -148,30 +148,37 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
   - **golden run** (simulator with rework and bad-row injection → feed → runner): 200,000 real units, **193,500 PASS / 6,498 FLAG / 2 QUARANTINE, identical to `classify()` on every unit** (verdict, reasons, D); GLDR-0421 held 02-06 03:00 (final QC 04:00) and GLDR-200000 held 02-18 07:00 (final QC 08:00), both passed by QC; 672 blank-ID rows rejected, 672 `ERR` rows quarantined INCOMPLETE; 671 rework republishes of 670 units, each re-scored once, the one identical repeat ignored.
 - **Measured:** simulator and gate as two concurrent processes over the full month: the factory finished publishing in 24 s and the gate caught up at 117 s; 672 runs, 0 errors, totals 2 / 6,498 / 193,500. Per-batch `duration_ms` (fetch → validate → score → write, monotonic clock): median 137 ms, p95 157 ms, p99 243 ms, max 300 ms for a median of 298 units (0.46 ms per unit). At the default speed of one build hour every 2 s, the gate is busy 6.9% of each interval (median), 15% worst case.
 
-### Step 4: Health, `pipeline/health.py`
+### Step 4: Health, `pipeline/health.py` (done)
 
-- **What:** the calculations behind the five health layers, computed from the database after each batch.
-- **How:**
-  - **FLAG-rate p-charts.** For each group (servo lot, line, shift, plant, vendor, model, and day), p = flagged / units. The centre line p̄ is the fleet FLAG rate (3.25%). Limits are p̄ ± 3·√(p̄(1 − p̄)/n) for that group's size n, so small groups get wider limits. A point outside the limits, or 8 consecutive points on one side of the centre line (a standard Western Electric run rule), is marked out of control. Lot charts use servo-level flags, so a bad supplier lot shows even when the rest of the vehicle is fine.
-  - **QC vs gate.** `final_qc_pass` share (reported) beside the gate's counts (held, flagged, clean). This shows the 100% pass rate against what the data actually says.
-  - **Open warnings:** units with QC exceptions, IMU or magnetometer calibration WARN, or failed strain relief, by type, line and QC station.
-  - **Throughput and rework:** units per build hour and day by plant, line and shift; rework share and count by code (R05, R12, R19, R21, R33) and line.
-  - **Instrument ceilings:** share of readings at each fixture ceiling, per metric.
-  - **Freshness:** time since the last batch, compared with the expected cadence. Stale means no batch for more than 3× the cadence.
-  - **Assumption check:** correlation between each servo's five metrics over the most recent 20,000 units. Alert if any |r| exceeds 0.1, because the D score's false-alarm rate would no longer hold.
+- **What:** five health layers, each green / amber / red, and one alert list, read from the gate's database (read-only) after each batch. Approved severities: **ALARM** = contain now (an open hold, a chart limit breached, the pipeline broken, D's assumption broken); **WATCH** = an early trend or a slowdown; **INFO** = the legacy QC comparison. A layer is red with any ALARM, amber with any WATCH.
+- **How, layer by layer:**
+
+  | Layer | Calculation | Alert |
+  |:--|:--|:--|
+  | 1. Product risk | Verdict counts; hold queue with each unit's held time, final-QC time, lead time and age (build hours); saturated units; latest human action per hold | Each open hold: ALARM (closed by RELEASED or RETEST_FAIL_REPLACED) |
+  | 2. Process stability | Daily FLAG-rate p-charts for the fleet and each plant, line (plant + line: LN1–LN3 exist at both plants), shift and QC station (vehicle verdict), and for each servo's lots, vendors and models (that servo's own flag); fleet hourly series for display | Point at or above its exact upper limit: ALARM. 8+ days in a row above the centre line: WATCH. At or below the exact lower limit: WATCH ("unusually clean: check the gate"). Only signals on the last 2 build days drive status; older ones stay marked on the chart |
+  | 3. Quality-system integrity | Final-QC pass share beside the gate's verdicts (a QC × verdict table); holds placed before final QC; open warnings (QC exception, IMU / magnetometer calibration WARN, strain relief failed) by type, line and QC station | QC passing ≥ 99.9% while the gate holds or flags units: INFO |
+  | 4. Throughput and rework | Units per build hour by line; per day by plant, line and shift; rework share by line and units by code (`|` or `;` separated) | A line building under 50% of its normal hourly units in the gate's latest hour: WATCH |
+  | 5. Gate and data health | Runner status and heartbeat age; feed state, cadence and silence; gate lag in build hours; batch latency p50 / p95 / max over the last 24 runs from `duration_ms`; ingest errors in those runs, grouped by reason; scoring- and health-baseline drift; correlation of each servo's five metrics over the 20,000 most recent units by build hour; share of readings at each fixture ceiling | STALLED: ALARM. Heartbeat older than 30 s: ALARM. Feed silent > 3× its cadence: ALARM (finished: INFO). Lag > 3 build hours: WATCH. p95 > 50% of the cadence: WATCH. Any ingest error: WATCH. Baseline drift: WATCH. Any \|r\| > 0.1: ALARM |
+
+  - **Exact binomial limits.** The plan had p̄ ± 3·√(p̄(1 − p̄)/n) and an 8-point run on either side. Checked on the real month before building (158 groups × 28 days, no real problem), that would have raised 45 false alarms, because servo flag rates are about 0.65% (≈1.6 flags per lot per day): the normal approximation is wrong at such small counts and most days fall below the average. Exact binomial limits at the same 0.135% tail, with the run rule applied above the centre line only, raise **2 ALARM points and 3 WATCH runs** on the same month, matched exactly by the tests. `binom_limits` walks the binomial pmf in log space (no SciPy); results are cached because closed days never change.
+  - **Frozen health baseline** (`tools/health_baseline.json`, built by `python3 -m pipeline.health baseline`): centre lines (vehicle 3.25%; servo 0.622–0.695%), normal units per line-hour (49–50), and every threshold above. Pinned at start with its SHA-256 and kept apart from the scoring baseline, so tuning an alarm never changes the scoring version. If either file on disk changes, or the health baseline was built for a different scoring version, health raises a WATCH.
+  - **Incremental counts.** One SQLite GROUP BY over 200,000 units takes about 570 ms, so recomputing ~20 of them per batch would exceed the 2 s demo cadence. Counts are loaded once and then updated from `score_history.id` (it only increases): a re-scored or reworked unit's old contribution is subtracted and its new one added, so nothing is counted twice. Units are held in memory as append-only parts with a live-row mask (compacted every 64 parts), so a batch never copies the whole table. All reads for one refresh run inside one read transaction (a consistent WAL snapshot).
+  - **Feed silence measured by the gate.** The factory now records `cadence_s`, `state` (running / finished) and `published_at` in `feed_meta`; `MesSource.feed_status()` reads them. The runner notes the feed clock on every poll and measures silence on its own monotonic clock from the last time that clock advanced, so a skewed factory wall clock cannot fake or hide silence; the heartbeat publishes it with the time it was checked. The heartbeat also now records the true feed clock (it previously recorded the batch's hour, which understated lag during catch-up), and the first heartbeat is written as soon as the gate's database exists.
 - **Why:**
-  - Per-unit flags catch defective units. Group charts catch a process going wrong before units fail, which is upstream prevention (I13).
-  - The QC-vs-gate comparison and the self-checks exist because the original failure was a quality system that looked healthy and wasn't (I4, I12, I14).
-  - Open warnings and rework give quality its closure list (I5, I6).
-  - The ceiling share tells fixture owners when their instrument range is hiding information (I7).
+  - Per-unit flags contain defective units; group charts catch a process going wrong before many units fail, which is upstream prevention (I13). The lot charts use that servo's own flag, so a bad supplier lot shows even when the rest of the vehicle is fine.
+  - The QC-vs-gate comparison and the gate's self-checks exist because the original failure was a quality system that looked healthy and wasn't (I4, I12, I14): a silent gate or a stopped feed turns red instead of looking like a clean day.
+  - Open warnings and rework give quality its closure list (I5, I6); the ceiling share tells fixture owners when their range hides information (I7).
 - **Problems addressed:** I3, I4, I5, I6, I7, I12, I13, I14.
-- **Check against known values:**
-  - FLAG rate 3.25%, with every plant, line, shift and day inside its limits (daily range 2.9–3.7% against limits of about 2.6–3.9%);
-  - maximum |r| about 0.006;
-  - 1,028 saturated vehicles;
-  - 59,229 units with open warnings;
-  - 20% reworked;
-  - plus a synthetic test that injects a drifting lot and confirms its p-chart goes out of control.
+- **Command line:** `python3 -m pipeline.health [--db …] [--watch 5] [--json]` (exit 2 when red, so a cron job or CI can alert); `python3 -m pipeline.health baseline` rebuilds the health baseline.
+- **Checks (`tests/test_health.py`, 26 tests), all passing:**
+  - exact limits equal a brute-force binomial sum; chart signals (above, below, run of 8, run reset, active window);
+  - running counts equal a full recount and a fresh load after new, reworked and rescored units, and after compaction;
+  - each alert rule at and just past its threshold: open hold until released, QC INFO, open warnings by type, stalled runner, heartbeat 29 s vs 31 s, feed silent 5.9 s vs 6.1 s at a 2 s cadence (finished → INFO; unpaced → none), lag 3 vs 4 build hours, latency from `duration_ms` with the wall clock running backwards, ingest errors grouped by reason, both baselines drifting, correlated readings, no database;
+  - simulator records cadence and `finished`; runner measures silence on its monotonic clock while the factory's wall clock is wrong; first heartbeat written as soon as the database exists;
+  - **real month** (200,000 units): 2 / 6,498 / 193,500; 1,028 saturated; QC passed 200,000 of 200,000; 59,229 units with open warnings (32,296 QC exceptions); 39,927 reworked (19.96%), codes R12 9,668 · R21 9,627 · R05 9,571 · R33 9,522 · R19 9,473; both holds placed 1 h before final QC. FLAG rate exactly 3.25%; every fleet, plant, line, shift and QC-station chart in control; daily fleet rate 2.88–3.67% against exact limits of 2.62–2.64% (low) and 3.90–3.92% (alarm). The rule set's signals equal an independent count made before the module existed: 2 above (aileron_l lot L2026-07C on 02-28, 9/358; rudder model AM-9 on 02-22, 24/1,699), 0 below, 5 run points; only the 02-28 lot point is recent enough to drive status. No throughput WATCH in any of the 672 hours (lowest line-hour 27 units vs a 24.5–25 threshold). Max \|r\| 0.0059 over the month, under 0.03 on the 20,000-unit window;
+  - **drifting lot:** 55 units of aileron_l lot L2026-03B made FLAG from 02-15 (about 3× its normal rate), applied as changed units through the store so the incremental path runs on 200,000 units: first ALARM on 02-15, the lot's later days above or in a run, no other aileron_l lot changed. (One seeded run; by simulation a 3× lot drift alarms in a median of 3 days, 90th percentile 8.)
+- **Measured:** first load of 200,000 units 7.3 s (reading 4.7 s, preparing 23 text columns 2.9 s; once per start). Per batch at 200,000 units: update median 96 ms, max 127 ms for 300 reworked units (each subtracted and re-added); snapshot 50–60 ms (it was 525 ms before counts were indexed by chart and units kept in parts). Live, with factory, gate and health as separate processes: stopping the factory raised `feed_silent` 12 s later (3 s threshold plus the 10 s heartbeat), stopping the gate raised `heartbeat` at 31 s, catch-up showed `lag` WATCH until it reached 0, and the finished replay showed `feed_finished` INFO with totals 2 / 6,498 / 193,500.
 
 ### Step 5: API and live push, `dashboard/app.py`
 
@@ -275,3 +282,4 @@ Each step has **what** is built, **how** it works, **why** it's built that way, 
 - **Blocking on open warnings:** shown, not blocked, because the data doesn't link them to failures (REPORT §6).
 - **Alert delivery** (email, Slack, pager): the health endpoint is designed for an alerting tool to poll; wiring one up is a deployment step.
 - **Postgres and multi-plant deployment:** the schema is written to move; the demo uses SQLite.
+- **CUSUM charts (future improvement):** a binomial CUSUM would catch small supplier drifts faster. Simulated for one lot of about 330 units a day at the same false-alarm rate as the p-charts (about one false signal per 860–940 days per group, decision interval h = 5), it detects a 2× drift in a median of 6 days (90th percentile 11), against 10 days (90th percentile 24) for the p-chart. It reaches 3–4 days only at 5–13× more false alarms (h = 2.5–3.5). Left out so the charts stay readable for operators, and because the per-unit gate already contains each bad unit during a slow drift.

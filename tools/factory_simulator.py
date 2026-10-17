@@ -13,7 +13,10 @@ Feed (outputs/live/mes.db)
                     the row was published), then every manufacturing.csv column.
                     A changed unit is published again as a new row (newest wins).
   feed_meta         feed_id (unique per feed, so a gate notices a replaced
-                    feed), next_hour (resume point), sim_time (factory clock)
+                    feed), next_hour (resume point), sim_time (factory clock),
+                    cadence_s (seconds between build hours; absent at max
+                    speed), state (running / finished), published_at (wall
+                    time of the last publish, for display)
 
 Test injections (off by default; clearly marked so they can't be mistaken for
 real data):
@@ -45,8 +48,8 @@ import pandas as pd
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
-from pipeline.source import FEED_TABLE, Pacer, ReplaySource  # noqa: E402
-from pipeline.store import _clean, _ident, columns_from_frame  # noqa: E402
+from pipeline.source import FEED_TABLE, Pacer, ReplaySource, parse_speed  # noqa: E402
+from pipeline.store import _clean, _ident, columns_from_frame, utc_now  # noqa: E402
 
 DEFAULT_INPUT = os.path.join(PROJECT_ROOT, "manufacturing.csv")
 DEFAULT_FEED = os.path.join(PROJECT_ROOT, "outputs", "live", "mes.db")
@@ -88,6 +91,10 @@ CREATE TABLE IF NOT EXISTS feed_meta (key TEXT PRIMARY KEY, value TEXT);""")
         r = self.conn.execute("SELECT value FROM feed_meta WHERE key=?", (key,)).fetchone()
         return r[0] if r else default
 
+    def set_meta(self, values):
+        self.conn.executemany("INSERT OR REPLACE INTO feed_meta VALUES (?, ?)",
+                              [(k, None if v is None else str(v)) for k, v in values.items()])
+
     def publish(self, frame, sim_time, next_hour):
         """One transaction per hour: the gate never sees half an hour."""
         rows = [[sim_time] + [_clean(v) for v in rec]
@@ -97,7 +104,8 @@ CREATE TABLE IF NOT EXISTS feed_meta (key TEXT PRIMARY KEY, value TEXT);""")
         try:
             c.executemany(self._insert, rows)
             c.executemany("INSERT OR REPLACE INTO feed_meta VALUES (?, ?)",
-                          [("next_hour", str(next_hour)), ("sim_time", sim_time)])
+                          [("next_hour", str(next_hour)), ("sim_time", sim_time),
+                           ("published_at", utc_now())])
             c.execute("COMMIT")
         except Exception:
             c.execute("ROLLBACK")
@@ -143,6 +151,9 @@ def run(input_path, feed_path, speed, reset=False, rework=0, bad=0, seed=0,
     rng = np.random.default_rng(seed)
     hour = int(feed.meta("next_hour", 0))
     published = 0
+    # The gate's health check judges silence against this cadence
+    cadence = parse_speed(speed)
+    feed.set_meta({"cadence_s": cadence, "state": "running"})
     try:
         while not replay.exhausted(hour) and (max_hours is None or published < max_hours):
             batch = replay.fetch_new(hour)
@@ -157,6 +168,8 @@ def run(input_path, feed_path, speed, reset=False, rework=0, bad=0, seed=0,
                       f"(hour {hour}/{len(replay.hours)})", flush=True)
             if not replay.exhausted(hour):
                 pacer.wait()
+        if replay.exhausted(hour):
+            feed.set_meta({"state": "finished"})  # silence from here on is expected
     finally:
         feed.close()
     return hour
