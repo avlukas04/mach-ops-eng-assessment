@@ -40,6 +40,7 @@
     "corr_window": 20000,
     "corr_min_units": 2000,
     "corr_alarm": 0.1,
-    "throughput_watch_share": 0.5
+    "throughput_watch_share": 0.5,
+    "throughput_watch_hours": 2
   }
 }

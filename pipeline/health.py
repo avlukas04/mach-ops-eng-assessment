@@ -92,7 +92,8 @@ DEFAULT_RULES = {
     "corr_window": 20000,
     "corr_min_units": 2000,
     "corr_alarm": 0.1,
-    "throughput_watch_share": 0.5,  # a line building under half its normal hourly units
+    "throughput_watch_share": 0.5,  # a line building under half its normal hourly units...
+    "throughput_watch_hours": 2,    # ...in each of this many build hours in a row
 }
 
 # Group dimensions for the p-charts. Line IDs repeat across plants (LN1 is
@@ -682,7 +683,8 @@ class Health:
         watch = self.throughput_watches(gate_hour, by_hour_line)
         for line, n, normal in watch:
             self._alert(ctx["alerts"], "throughput", "WATCH", f"units:{line}",
-                        f"{line} built {n} units in {gate_hour} (normal {normal:g}/h)",
+                        f"{line} built {n} units in {gate_hour}, under half its normal "
+                        f"{normal:g}/h for {self.rules['throughput_watch_hours']} build hours in a row",
                         group=line, value=n, limit=normal * self.rules["throughput_watch_share"],
                         sim=gate_hour, now=ctx["now"])
         rework = {g: {"units": n, "reworked": k, "share": round(k / n, 4) if n else None}
@@ -702,7 +704,11 @@ class Health:
                            "by_line": rework, "by_code": codes}}
 
     def throughput_watches(self, hour, by_hour_line=None):
-        """Lines that built under the watch share of their normal units in `hour`."""
+        """Lines that built under the watch share of their normal units in
+        `hour` and in each of the build hours just before it (the
+        throughput_watch_hours rule). One slow hour is normal variation (the
+        month's quietest line-hour, 27 units, is close to the ~25 line); a
+        line that stays slow has a real problem."""
         if not hour:
             return []
         if by_hour_line is None:
@@ -710,14 +716,20 @@ class Health:
             for (line, _, h), (n, _) in self.counts.get("units", {}).items():
                 d = by_hour_line.setdefault(h, {})
                 d[line] = d.get(line, 0) + int(n)
-        built = by_hour_line.get(hour, {})
-        if not built:
-            return []  # no units at all: a feed problem, reported by the gate layer
+        try:
+            end = dt.datetime.strptime(hour[:19], "%Y-%m-%dT%H:%M:%S")
+        except ValueError:
+            return []
+        span = max(1, int(self.rules["throughput_watch_hours"]))
+        hours = [(end - dt.timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S") for i in range(span)]
+        built = [by_hour_line.get(h, {}) for h in hours]
+        if not all(built):
+            return []  # an hour with no units at all: a feed problem, reported by the gate layer
         out = []
         for line, normal in self.hb["throughput"]["line_units_per_hour_median"].items():
-            n = built.get(line, 0)
-            if n < normal * self.rules["throughput_watch_share"]:
-                out.append((line, n, normal))
+            limit = normal * self.rules["throughput_watch_share"]
+            if all(b.get(line, 0) < limit for b in built):
+                out.append((line, built[0].get(line, 0), normal))
         return out
 
     # ---- layer 5: gate and data health

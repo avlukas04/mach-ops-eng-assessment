@@ -238,6 +238,28 @@ class ProductAndQualityTest(SyntheticBase):
         self.assertEqual(ow["any"]["by_qc_station"], {"QC-2": 4})
 
 
+    def test_throughput_watch_needs_two_slow_hours_in_a_row(self):
+        normal = {line: 50 for line in self.h.hb["throughput"]["line_units_per_hour_median"]}
+        slow = dict(normal, **{"HB-PLANT-1/LN2": 20})
+        h0, h1, h2 = "2026-02-01T00:00:00", "2026-02-01T01:00:00", "2026-02-01T02:00:00"
+        # One slow hour (the month's quietest real line-hour was 27): no watch
+        self.assertEqual(self.h.throughput_watches(h1, {h0: normal, h1: slow}), [])
+        # Slow, then recovered: no watch
+        self.assertEqual(self.h.throughput_watches(h2, {h0: normal, h1: slow, h2: normal}), [])
+        # Slow two build hours in a row: WATCH, reporting the latest hour's count
+        self.assertEqual(self.h.throughput_watches(h2, {h1: slow, h2: slow}),
+                         [("HB-PLANT-1/LN2", 20, 49.0)])
+        # Exactly at the limit is not under it (half of 49 is 24.5; 25 is fine)
+        edge = dict(normal, **{"HB-PLANT-1/LN2": 25})
+        self.assertEqual(self.h.throughput_watches(h2, {h1: edge, h2: edge}), [])
+        # A stopped line (0 units) for two hours while others build: WATCH
+        stopped = {k: v for k, v in normal.items() if k != "OC-PLANT-2/LN3"}
+        self.assertEqual(self.h.throughput_watches(h2, {h1: stopped, h2: stopped}),
+                         [("OC-PLANT-2/LN3", 0, 49.0)])
+        # The previous hour has no units at all: a feed gap, left to the gate layer
+        self.assertEqual(self.h.throughput_watches(h2, {h2: slow}), [])
+
+
 class GateHealthTest(SyntheticBase):
     def gate_alerts(self, **meta):
         self.healthy_meta(**meta)
